@@ -31,7 +31,7 @@ for (let i = 0; i < calls.length; i++) {
     fs.writeFileSync(`${basename}-plan.json`, JSON.stringify(result.plan, null, 2));
     fs.writeFileSync(`${basename}-plan.svg`, planToSVG(result.plan));
     fs.writeFileSync(`${basename}-generator.js`, source);
-    results.push({ version: i + 1, built: true, checks: check, entry: result.plan.entry, rooms: result.plan.rooms.length, params: Object.keys(result.params).length, assumptions: result.assumptions.length });
+    results.push({ version: i + 1, built: true, checks: check, entry: result.plan.entry, rooms: result.plan.rooms.length, params: Object.keys(result.params).length, assumptions: result.assumptions.length, repairs: result.repairs });
   } catch (error) {
     check = { ok: false, failures: [(error as Error).message] };
     results.push({ version: i + 1, built: false, checks: check });

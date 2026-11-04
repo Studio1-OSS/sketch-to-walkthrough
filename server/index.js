@@ -7,6 +7,8 @@ const app = new Hono();
 const API_KEY = process.env.NEBIUS_API_KEY;
 const BASE_URL = (process.env.NEBIUS_BASE_URL || 'https://api.tokenfactory.nebius.com/v1').replace(/\/$/, '');
 const MODEL = process.env.MODEL || 'moonshotai/Kimi-K3.1-Pro';
+const GENERATE_REASONING_EFFORT = process.env.GENERATE_REASONING_EFFORT || 'low';
+const REVIEW_REASONING_EFFORT = process.env.REVIEW_REASONING_EFFORT || 'medium';
 const generatePrompt = await readFile(new URL('../prompts/generate.md', import.meta.url), 'utf8');
 const reviewPrompt = await readFile(new URL('../prompts/review.md', import.meta.url), 'utf8');
 const imagePart = (data) => ({ type: 'image_url', image_url: { url: data } });
@@ -31,7 +33,7 @@ async function completion(messages, kind, maxTokens = 18000) {
     const response = await fetch(`${BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: MODEL, messages: requestMessages, stream: true, stream_options: { include_usage: true }, reasoning_effort: kind === 'generate' ? 'low' : 'medium', max_tokens: maxTokens, temperature: 0.2 }),
+      body: JSON.stringify({ model: MODEL, messages: requestMessages, stream: true, stream_options: { include_usage: true }, reasoning_effort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT, max_tokens: maxTokens, temperature: 0.2 }),
       signal: AbortSignal.timeout(600000),
     });
     if (!response.ok) throw new Error(`Model API ${response.status}: ${(await response.text()).slice(0, 600)}`);
@@ -64,8 +66,9 @@ async function completion(messages, kind, maxTokens = 18000) {
       const elapsed = (performance.now() - started) / 1000;
       const tokens = usage?.completion_tokens ?? 0;
       const tokensPerSecond = elapsed ? Math.round(tokens / elapsed * 10) / 10 : 0;
-      console.log(`[${MODEL}] ${kind}: ${tokens} completion tokens, ${tokensPerSecond} tokens/sec, ${elapsed.toFixed(1)}s`);
-      return { text: prefix, usage: { prompt: usage?.prompt_tokens ?? 0, completion: tokens, total: usage?.total_tokens ?? 0 }, elapsed: Math.round(elapsed * 100) / 100, tokensPerSecond, model: MODEL };
+      const reasoning = usage?.completion_tokens_details?.reasoning_tokens ?? null;
+      console.log(`[${MODEL}] ${kind}: ${tokens} completion tokens (${reasoning ?? 'unknown'} reasoning), ${tokensPerSecond} tokens/sec, ${elapsed.toFixed(1)}s`);
+      return { text: prefix, usage: { prompt: usage?.prompt_tokens ?? 0, completion: tokens, total: usage?.total_tokens ?? 0, reasoning }, elapsed: Math.round(elapsed * 100) / 100, tokensPerSecond, model: MODEL, reasoningEffort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT };
     }
     if (!prefix) throw new Error(`Model stream failed before returning content: ${failure?.message || 'incomplete response'}`);
     console.warn(`[${MODEL}] ${kind}: interrupted response, continuing ${prefix.length} characters (${attempt + 1}/3).`);
@@ -75,11 +78,13 @@ async function completion(messages, kind, maxTokens = 18000) {
 
 app.use('*', async (c, next) => {
   c.header('Access-Control-Allow-Origin', '*');
+  c.header('Access-Control-Allow-Headers', 'Content-Type');
+  c.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   c.header('X-Content-Type-Options', 'nosniff');
   await next();
 });
 app.options('*', (c) => c.body(null, 204));
-app.get('/api/health', (c) => c.json({ ok: true, configured: Boolean(API_KEY), model: MODEL, baseUrl: BASE_URL }));
+app.get('/api/health', (c) => c.json({ ok: true, configured: Boolean(API_KEY), model: MODEL, baseUrl: BASE_URL, generateReasoningEffort: GENERATE_REASONING_EFFORT, reviewReasoningEffort: REVIEW_REASONING_EFFORT }));
 
 app.post('/api/generate', async (c) => {
   try {

@@ -1,7 +1,7 @@
 import type { WorkerResult } from './plan.worker';
 import type { Assumption, ParamDef, PlanSpec } from './plan';
 
-export type BuildResult = { plan: PlanSpec; params: Record<string, ParamDef>; assumptions: Assumption[]; elapsed: number };
+export type BuildResult = { plan: PlanSpec; params: Record<string, ParamDef>; assumptions: Assumption[]; repairs: string[]; elapsed: number };
 let counter = 0;
 
 export function runGenerator(source: string, values?: Record<string, number>, timeout = 500): Promise<BuildResult> {

@@ -31,6 +31,18 @@ try {
   await wait(700); await shot('01-landing');
   record('Landing renders real WebGL and original sample', await page.locator('.hero-model canvas').count() === 1 && await page.locator('.hero-paper img').evaluate((img) => img.complete && img.naturalWidth > 0));
   record('Desktop landing has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  for (const width of [1440, 1280, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 960 }); await wait(350);
+    const heroLayout = await page.evaluate(() => {
+      const rect = (selector) => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; };
+      const intersects = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
+      const arrow = rect('.hero-arrow span'), title = rect('.model-card-head'), dimension = rect('.hero-dim-label'), model = rect('.hero-model');
+      return { titleOverlap: intersects(arrow, title), dimensionOverlap: intersects(dimension, model), arrow, title, dimension, model };
+    });
+    record(`Hero annotations do not overlap at ${width} px`, !heroLayout.titleOverlap && !heroLayout.dimensionOverlap, heroLayout);
+    if (width !== 1440) await shot(`01-landing-${width}`);
+  }
+  await page.setViewportSize({ width: 1440, height: 960 }); await wait(350);
   await page.getByRole('button', { name: 'Open The two-bedroom prepared demo', exact: true }).click();
   await page.waitForSelector('.canvas-wrap .viewer-host[data-ready="true"]', { timeout: 60000 }); await wait(700); await shot('02-dollhouse');
   record('Prepared demo passes all engineering checks', await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks') === 'pass');
@@ -73,9 +85,27 @@ try {
   record('Exported PlanSpec reflects edited slider values', json.rooms.find((r) => r.id === 'hall').polygon[1][0] > 6500);
   await page.getByRole('tab', { name: /Assumptions/ }).click(); await wait(150); await shot('04-assumptions');
   record('Assumptions include their linked editable sliders', await page.locator('.assumption-card input[type="range"]').count() === 4);
+  const assumptionValues = await page.locator('.assumption-card').evaluateAll((cards) => cards.map((card) => ({ id: card.dataset.assumptionId, original: card.dataset.originalValue, current: card.dataset.currentValue, slider: card.querySelector('input[type="range"]')?.value, originalHeading: card.querySelector('.assumption-number')?.textContent, valuesShown: Boolean(card.querySelector('.assumption-values')) })));
+  record('Every assumption card separates original and live values', assumptionValues.length === 4 && assumptionValues.every((card) => card.originalHeading.startsWith('ORIGINAL ASSUMPTION') && card.valuesShown && card.original && card.current === card.slider) && assumptionValues[0].original === '2700' && assumptionValues[0].current === '3400', assumptionValues);
+  await slider('assumption-wall_height', 3300);
+  const editedAssumption = await page.locator('[data-assumption-id="height"]').evaluate((card) => ({ original: card.dataset.originalValue, current: card.dataset.currentValue, text: card.querySelector('p').textContent }));
+  record('Editing an assumption preserves its original text and value', editedAssumption.original === '2700' && editedAssumption.current === '3300' && editedAssumption.text.includes('2700 mm'), editedAssumption);
   await page.getByRole('tab', { name: 'Walkthrough', exact: true }).click(); await wait(500);
   await getWalk(); await wait(600); await shot('05-walkthrough');
   record('First-person mode starts inside the plan', await page.locator('.canvas-location').innerText() === 'EYE LEVEL · 1.6 M');
+  const spawnClearance = await page.locator('.canvas-wrap .viewer-host').evaluate((host) => ({ surface: Number(host.dataset.spawnClearance), centerline: Number(host.dataset.spawnWallDistance), room: host.dataset.spawnRoom, position: host.dataset.spawn }));
+  record('Walkthrough spawn is at least 900 mm from every wall', spawnClearance.surface >= 1000 && spawnClearance.centerline >= 900 && !spawnClearance.position.startsWith('6050,700'), spawnClearance);
+  const walkLabels = await page.evaluate(async () => {
+    const { buildWorld, disposeWorld } = await import('/src/lib/world.ts');
+    const { buildFromModule } = await import('/src/lib/module.ts');
+    const { SAMPLE_SOURCE } = await import('/src/lib/sample.ts');
+    const world = buildWorld(buildFromModule(SAMPLE_SOURCE).plan, { labels: true, ceiling: true, walkthrough: true });
+    const labels = [];
+    world.traverse((object) => { if (object.isSprite && object.userData.roomLabel) labels.push({ depthTest: object.material.depthTest, depthWrite: object.material.depthWrite, sizeAttenuation: object.material.sizeAttenuation }); });
+    disposeWorld(world);
+    return labels;
+  });
+  record('Room labels are occluded by walls in walkthrough', walkLabels.length === 5 && walkLabels.every((label) => label.depthTest && !label.depthWrite && !label.sizeAttenuation) && await page.locator('.canvas-wrap .viewer-host').getAttribute('data-labels-occluded') === 'true', { labels: walkLabels });
   const before = await canvasPixels();
   await page.keyboard.down('w'); await wait(1200); await page.keyboard.up('w'); await wait(150);
   record('WASD changes the rendered first-person scene', before !== await canvasPixels());
@@ -95,6 +125,41 @@ try {
   await page.keyboard.press('Escape'); await page.evaluate(() => { if (document.pointerLockElement) document.exitPointerLock(); });
   await page.getByRole('button', { name: 'Sketch to Walkthrough home' }).click(); await wait(500); await page.screenshot({ path: path.join(OUT, '09-mobile-landing.png'), fullPage: true });
   record('390 px landing has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.setViewportSize({ width: 1440, height: 960 });
+  const inclusiveBounds = await page.evaluate(async () => {
+    const { buildFromModule } = await import('/src/lib/module.ts');
+    const { SAMPLE_SOURCE } = await import('/src/lib/sample.ts');
+    return [2400, 3400].every((value) => buildFromModule(SAMPLE_SOURCE, { wall_height: value }).plan.wallHeight === value);
+  });
+  record('A parameter exactly at min or max is valid', inclusiveBounds);
+  const source = await page.evaluate(async () => (await import('/src/lib/sample.ts')).SAMPLE_SOURCE);
+  let releaseFirstReview, releaseSecondReview, reviewCount = 0;
+  const firstReviewGate = new Promise((resolve) => { releaseFirstReview = resolve; });
+  const secondReviewGate = new Promise((resolve) => { releaseSecondReview = resolve; });
+  const repairedSource = source.replace('value: 2700, min: 2400', 'value: 3600, min: 2400').replace(', param: "wall_height"', '');
+  await page.route('**/api/generate', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ code: repairedSource, model: 'browser-check-mock', elapsed: 0.1, tokensPerSecond: 10, usage: { completion: 1, total: 1 } }) }));
+  await page.route('**/api/review', async (route) => {
+    reviewCount += 1;
+    await (reviewCount === 1 ? firstReviewGate : secondReviewGate);
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ code: reviewCount === 1 ? source.replace('value: 2700, min: 2400', 'value: 2800, min: 2400') : '', verdict: reviewCount === 1 ? 'REVISE' : 'PASS', issues: [], improvements: [], model: 'browser-check-mock', elapsed: 0.1, tokensPerSecond: 10, usage: { completion: 1, total: 1 } }) });
+  });
+  await page.getByRole('button', { name: 'Generate walkthrough from The two-bedroom', exact: true }).click();
+  await page.waitForSelector('.review-progress', { state: 'visible', timeout: 15000 });
+  const firstValidVisible = await page.locator('.generation-overlay').count() === 0 && await page.locator('.canvas-wrap .viewer-host[data-checks="pass"]').count() === 1 && await page.locator('.studio').getAttribute('data-active-version') === '1';
+  record('v1 opens as soon as it validates while review continues', firstValidVisible);
+  await shot('10-first-valid-background-review');
+  await page.getByRole('tab', { name: /Checks/ }).click();
+  const repairNotes = await page.locator('[data-testid="repair-notes"]').innerText();
+  record('Local parameter and assumption repairs are visible on v1', repairNotes.includes('clamped 3600 to 3400') && repairNotes.includes('linked missing param to wall_height') && repairNotes.includes('no model retry'), { repairNotes });
+  await page.getByRole('tab', { name: 'Walkthrough', exact: true }).click();
+  releaseFirstReview();
+  await page.waitForFunction(() => document.querySelectorAll('.version-button').length === 2);
+  await page.waitForSelector('.new-version-notice', { state: 'visible' });
+  record('A revised v2 does not interrupt the v1 walkthrough', await page.locator('.studio').getAttribute('data-active-version') === '1' && await page.getByRole('tab', { name: 'Walkthrough', exact: true }).getAttribute('aria-selected') === 'true');
+  await shot('11-new-version-available');
+  releaseSecondReview();
+  await page.waitForSelector('.review-progress', { state: 'hidden', timeout: 15000 });
+  await page.unroute('**/api/generate'); await page.unroute('**/api/review');
   record('Browser has no runtime or WebGL errors', errors.length === 0, { errors });
 } catch (error) {
   record('Completed full browser flow', false, { error: String(error) });

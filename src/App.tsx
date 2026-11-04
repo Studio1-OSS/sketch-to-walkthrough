@@ -4,7 +4,7 @@ import { DetailSlider } from './components/DetailSlider';
 import { WalkControls } from './components/WalkControls';
 import { runGenerator, type BuildResult } from './lib/builder';
 import { SAMPLE_SOURCE, SAMPLES } from './lib/sample';
-import { paramValues, type Assumption, type ParamDef, type PlanSpec } from './lib/plan';
+import { formatMM, paramValues, type Assumption, type ParamDef, type PlanSpec } from './lib/plan';
 import { runChecks, type CheckResults } from './lib/checks';
 import { planToSVG, svgToPng } from './lib/plan-svg';
 import { PlanViewer, type ViewMode, type ViewerHandle } from './three/PlanViewer';
@@ -13,8 +13,8 @@ import './styles.css';
 
 type Usage = { kind: string; model: string; completion: number; total: number; elapsed: number; tokensPerSecond: number };
 type Version = {
-  id: number; source: string; plan: PlanSpec | null; params: Record<string, ParamDef>; assumptions: Assumption[];
-  checks: CheckResults | null; error?: string; verdict?: string; issues?: string[]; improvements?: string[]; elapsed?: number;
+  id: number; source: string; plan: PlanSpec | null; params: Record<string, ParamDef>; originalParams: Record<string, ParamDef>; assumptions: Assumption[];
+  checks: CheckResults | null; repairs: string[]; error?: string; verdict?: string; issues?: string[]; improvements?: string[]; elapsed?: number;
 };
 type Progress = { title: string; detail: string; step: number } | null;
 
@@ -33,7 +33,7 @@ async function api(path: string, payload: object) {
   return result;
 }
 function versionFromBuild(id: number, source: string, result: BuildResult): Version {
-  return { id, source, ...result, checks: runChecks(result.plan) };
+  return { id, source, ...result, originalParams: structuredClone(result.params), checks: runChecks(result.plan) };
 }
 const orderedEntries = (params: Record<string, ParamDef>) => Object.entries(params).sort(([, a], [, b]) => a.group.localeCompare(b.group));
 
@@ -57,6 +57,7 @@ function App() {
   const [model, setModel] = useState('moonshotai/Kimi-K3.1-Pro');
   const [exporting, setExporting] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [firstWalkableElapsed, setFirstWalkableElapsed] = useState<number | null>(null);
   const [toast, setToast] = useState('');
   const [paramElapsed, setParamElapsed] = useState<number | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -69,6 +70,7 @@ function App() {
   const version = activeVersion?.plan ? activeVersion : versions.filter((v) => v.plan).at(-1);
   const plan = version?.plan;
   const paramEntries = version ? orderedEntries(version.params) : [];
+  const newerVersion = activeVersion ? versions.filter((v) => v.id > activeVersion.id && v.plan && v.checks?.ok).at(-1) : undefined;
 
   useEffect(() => { runGenerator(SAMPLE_SOURCE).then(setDemo).catch(console.error); }, []);
   useEffect(() => { fetch('/api/health').then((r) => r.json()).then((r) => setModel(r.model)).catch(() => {}); }, []);
@@ -86,7 +88,7 @@ function App() {
     const id = ++runRef.current; setScreen('studio'); setSketch(sample.image); setSketchName(`${sample.id}.png`); setError(''); setProgress({ title: 'Opening your sample', detail: 'A ready-made plan. No model call needed.', step: 1 });
     try {
       const result = demo ?? await runGenerator(SAMPLE_SOURCE); if (runRef.current !== id) return;
-      setVersions([versionFromBuild(1, SAMPLE_SOURCE, result)]); setActiveId(1); setMode('dollhouse'); setTab('dimensions'); setUsage([]); setElapsed(0); setProgress(null);
+      setVersions([versionFromBuild(1, SAMPLE_SOURCE, result)]); setActiveId(1); setMode('dollhouse'); setTab('dimensions'); setUsage([]); setElapsed(0); setFirstWalkableElapsed(null); setProgress(null);
     } catch (e) { setProgress(null); setError((e as Error).message); }
   };
   const upload = async (file: File) => {
@@ -97,26 +99,35 @@ function App() {
   const generate = async (file: File | Blob) => {
     const id = ++runRef.current; const started = performance.now();
     const data = await imageFile(file);
-    setScreen('studio'); setSketch(data); setVersions([]); setUsage([]); setMode('plan'); setError(''); setTab('checks');
+    setScreen('studio'); setSketch(data); setVersions([]); setUsage([]); setMode('plan'); setError(''); setTab('checks'); setElapsed(0); setFirstWalkableElapsed(null);
     setProgress({ title: 'Reading between the lines', detail: 'Kimi is reading your rooms and written dimensions.', step: 0 });
-    let code = '', usedRefinement = false, lastReview: { verdict: string; issues: string[]; improvements: string[] } | null = null;
+    let code = '', usedRefinement = false, firstValidId: number | null = null, lastReview: { verdict: string; issues: string[]; improvements: string[] } | null = null;
     try {
       const call = await api('/api/generate', { image: data }); if (runRef.current !== id) return;
       setUsage((u) => [...u, { ...call, completion: call.usage.completion, total: call.usage.total, kind: 'Generate' }]); code = call.code;
       for (let number = 1; number <= 3; number++) {
         let next: Version;
         let checkedRender: string | undefined;
-        setProgress({ title: number === 1 ? 'Turning lines into geometry' : `Refining your plan · v${number}`, detail: 'Building in a sandbox. Engineering every connection.', step: 1 });
+        setProgress({ title: number === 1 ? 'Turning lines into geometry' : `Refining your plan · v${number}`, detail: firstValidId ? 'A newer version is being checked. Keep exploring the current one.' : 'Building in a sandbox. Engineering every connection.', step: 1 });
         try {
           const result = await runGenerator(code); if (runRef.current !== id) return;
           next = versionFromBuild(number, code, result);
-          checkedRender = await svgToPng(planToSVG(result.plan, { width: 1400 }));
         } catch (e) {
-          next = { id: number, source: code, plan: null, params: {}, assumptions: [], checks: null, error: (e as Error).message };
+          next = { id: number, source: code, plan: null, params: {}, originalParams: {}, assumptions: [], checks: null, repairs: [], error: (e as Error).message };
         }
         if (runRef.current !== id) return;
-        setVersions((old) => { const existing = old.filter((v) => v.id !== number); return [...existing, next]; }); setActiveId(number);
-        setProgress({ title: 'A second pair of eyes', detail: `Kimi is comparing v${number} with the original sketch.`, step: 2 });
+        setVersions((old) => { const existing = old.filter((v) => v.id !== number); return [...existing, next]; });
+        if (next.plan && next.checks?.ok && firstValidId === null) {
+          firstValidId = number;
+          setActiveId(number);
+          setMode('dollhouse');
+          setTab('dimensions');
+          setFirstWalkableElapsed((performance.now() - started) / 1000);
+          setToast(`v${number} is walkable. Vision review continues in the background.`);
+        } else if (firstValidId === null) setActiveId(number);
+        setProgress({ title: firstValidId ? 'Reviewing in the background' : 'A second pair of eyes', detail: `Kimi is comparing v${number} with the original sketch.`, step: 2 });
+        if (next.plan) checkedRender = await svgToPng(planToSVG(next.plan, { width: 1400 }));
+        if (runRef.current !== id) return;
         const review = await api('/api/review', { sketch: data, code, render: checkedRender, failures: next.checks?.failures ?? [], buildError: next.error });
         if (runRef.current !== id) return;
         setUsage((u) => [...u, { ...review, completion: review.usage.completion, total: review.usage.total, kind: `Review v${number}` }]);
@@ -129,8 +140,7 @@ function App() {
           code = review.code; continue;
         }
         setElapsed((performance.now() - started) / 1000); setProgress(null);
-        if (next.checks?.ok) { setTab('dimensions'); setMode('dollhouse'); }
-        else setTab('checks');
+        if (firstValidId === null) setTab('checks');
         return;
       }
       setProgress(null); setElapsed((performance.now() - started) / 1000);
@@ -219,8 +229,8 @@ function App() {
       <section className="how-section" id="how-it-works"><div className="how-copy"><div className="eyebrow"><span /> THOUGHTFUL BY DESIGN</div><h2>Not just a pretty picture.<br /><em>A plan that holds together.</em></h2><p>Kimi understands the drawing. A deterministic geometry engine checks the things a vision model can’t: closed walls, reachable rooms, doors that fit.</p><a href="#open-source">Built in the open. See how it works <Icon name="arrow" size={16} /></a></div><div className="loop-cards"><div className="loop-card"><Icon name="spark" size={20} /><span className="loop-number">1 / GENERATE</span><h3>Read the sketch</h3><p>Dimensions become clean, editable parameters.</p></div><div className="loop-card"><Icon name="check" size={20} /><span className="loop-number">2 / CHECK</span><h3>Test the geometry</h3><p>Every wall, opening, and connection is validated.</p></div><div className="loop-card"><Icon name="plan" size={20} /><span className="loop-number">3 / RENDER</span><h3>Draw the plan</h3><p>A precise, top-down view reveals what changed.</p></div><div className="loop-card"><Icon name="eye" size={20} /><span className="loop-number">4 / REFINE</span><h3>Compare, then improve</h3><p>Original meets render. Up to three versions, kept.</p></div></div></section>
 
       <section className="closing-section" id="open-source"><span className="closing-star">✳</span><div className="eyebrow"><span /> LESS BARRIER. MORE POSSIBILITY.</div><h2>A small sketch can be<br />the start of <em>somewhere.</em></h2><button className="light-button" onClick={() => fileRef.current?.click()}>Make your first walkthrough <Icon name="arrow" /></button><div className="closing-notes"><span>Free & open source</span><i /> <span>Your sketch stays in this session</span><i /><span>No architectural degree required</span></div></section>
-    </main> : <main className="studio">
-      <div className="studio-titlebar"><div className="studio-title"><span className="studio-breadcrumb">YOUR WORKSPACE <span>/</span> {sketchName}</span><h1>A new perspective on your plan<span>.</span></h1></div><div className="history"><span className="history-label">VERSIONS</span>{versions.map((v) => <button key={v.id} className={`version-button ${v.id === activeVersion?.id ? 'active' : ''} ${v.plan ? '' : 'invalid'}`} onClick={() => changeVersion(v.id)} disabled={Boolean(progress)}>v{v.id}{v.verdict === 'PASS' && <i />}</button>)}</div></div>
+    </main> : <main className="studio" data-first-walkable={firstWalkableElapsed ?? ''} data-final-elapsed={elapsed || ''} data-active-version={activeVersion?.id ?? ''}>
+      <div className="studio-titlebar"><div className="studio-title"><span className="studio-breadcrumb">YOUR WORKSPACE <span>/</span> {sketchName}</span><h1>A new perspective on your plan<span>.</span></h1></div><div className="history"><span className="history-label">VERSIONS</span>{versions.map((v) => <button key={v.id} className={`version-button ${v.id === activeVersion?.id ? 'active' : ''} ${v.plan ? '' : 'invalid'}`} onClick={() => changeVersion(v.id)} disabled={Boolean(progress) && !plan}>v{v.id}{v.verdict === 'PASS' && <i />}</button>)}</div></div>
       <div className="workspace">
         <section className="viewport-panel" aria-label="Plan viewer">
           <div className="viewport-toolbar"><div className="mode-switch" role="tablist" aria-label="View mode"><button role="tab" aria-selected={mode === 'plan'} className={mode === 'plan' ? 'selected' : ''} onClick={() => setMode('plan')}><Icon name="plan" /> Plan</button><button role="tab" aria-selected={mode === 'dollhouse'} className={mode === 'dollhouse' ? 'selected' : ''} onClick={() => setMode('dollhouse')}><Icon name="cube" /> Dollhouse</button><button role="tab" aria-selected={mode === 'walk'} className={mode === 'walk' ? 'selected' : ''} onClick={() => setMode('walk')}><Icon name="walk" /> Walkthrough</button></div><div className="viewport-actions"><button className={`icon-button label-toggle ${labels ? 'active' : ''}`} title="Toggle room labels" aria-pressed={labels} onClick={() => setLabels(!labels)}><Icon name="layers" size={17} /><span>Labels</span></button><button className="icon-button" title="Reset camera" onClick={() => viewerRef.current?.reset()}><Icon name="reset" size={17} /></button></div></div>
@@ -232,7 +242,9 @@ function App() {
             {plan && mode === 'walk' && locked && <><div className="crosshair" /><div className="walk-help"><span>W A S D <small>move</small></span><span>MOUSE <small>look</small></span><span>ESC <small>exit</small></span></div><WalkControls onMove={(x, y) => viewerRef.current?.setJoystick(x, y)} /></>}
             {plan && mode !== 'walk' && <div className="viewport-scale"><span />{mode === 'plan' ? 'DIMENSIONS IN MM' : 'DRAG TO ORBIT · SCROLL TO ZOOM'}</div>}
             {activeVersion && !activeVersion.plan && version && <div className="invalid-version-note" role="status"><Icon name="info" size={15} /><span><b>v{activeVersion.id} did not validate.</b> Showing v{version.id}, the last valid plan. See Checks for the returned error.</span></div>}
-            {progress && <div className="generation-overlay"><div className="sketch-preview"><img src={sketch} alt="Your uploaded floor plan" /><span className="preview-tag"><span /> YOUR ORIGINAL</span></div><div className="generation-copy"><div className="generation-orbit"><span /><span /><Icon name="spark" size={25} /></div><span className="generation-kicker">SKETCH → GEOMETRY → SPACE</span><h2>{progress.title}<i className="loading-dots">...</i></h2><p>{progress.detail}</p><div className="generation-steps">{['Read the sketch', 'Build & check', 'Review the render'].map((step, i) => <div key={step} className={i < progress.step ? 'complete' : i === progress.step ? 'active' : ''}><span>{i < progress.step ? <Icon name="check" size={12} /> : `0${i + 1}`}</span>{step}</div>)}</div><p className="generation-small">Large sketches may take a minute. Good spaces are worth a moment.</p></div></div>}
+            {progress && plan && <div className="review-progress" role="status"><span /><div><b>{progress.title}</b><small>{progress.detail}</small></div></div>}
+            {newerVersion && <button className="new-version-notice" onClick={() => changeVersion(newerVersion.id)}>v{newerVersion.id} · newer version available <Icon name="arrow" size={13} /></button>}
+            {progress && !plan && <div className="generation-overlay"><div className="sketch-preview"><img src={sketch} alt="Your uploaded floor plan" /><span className="preview-tag"><span /> YOUR ORIGINAL</span></div><div className="generation-copy"><div className="generation-orbit"><span /><span /><Icon name="spark" size={25} /></div><span className="generation-kicker">SKETCH → GEOMETRY → SPACE</span><h2>{progress.title}<i className="loading-dots">...</i></h2><p>{progress.detail}</p><div className="generation-steps">{['Read the sketch', 'Build & check', 'Review the render'].map((step, i) => <div key={step} className={i < progress.step ? 'complete' : i === progress.step ? 'active' : ''}><span>{i < progress.step ? <Icon name="check" size={12} /> : `0${i + 1}`}</span>{step}</div>)}</div><p className="generation-small">Large sketches may take a minute. Good spaces are worth a moment.</p></div></div>}
             {!plan && !progress && <div className="empty-workspace"><Icon name="plan" size={42} /><h2>Let’s try that again.</h2><p>Your next walkthrough starts with the original sketch.</p><button className="primary-button" onClick={regenerate}>Retry this sketch <Icon name="reset" /></button></div>}
           </div>
           <div className="viewport-footer"><div className="geometry-stats">{plan ? <><span><Icon name="plan" size={14} />{plan.rooms.length} rooms</span><i /><span>{plan.walls.length} walls</span><i /><span>{plan.openings.length} openings</span></> : <span className="muted">Waiting for your sketch…</span>}</div><div className="local-geometry"><span className={updating ? 'update-dot updating' : 'update-dot'} />{updating ? 'Rebuilding…' : 'LOCAL GEOMETRY'}{paramElapsed !== null && <span className="rebuild-time">{paramElapsed.toFixed(1)} ms</span>}</div></div>
@@ -243,11 +255,25 @@ function App() {
           <div className="inspector-tabs" role="tablist"><button role="tab" aria-selected={tab === 'dimensions'} className={tab === 'dimensions' ? 'active' : ''} onClick={() => setTab('dimensions')}>Dimensions</button><button role="tab" aria-selected={tab === 'assumptions'} className={tab === 'assumptions' ? 'active' : ''} onClick={() => setTab('assumptions')}>Assumptions{version?.assumptions.length ? <span>{version.assumptions.length}</span> : null}</button><button role="tab" aria-selected={tab === 'checks'} className={tab === 'checks' ? 'active' : ''} onClick={() => setTab('checks')}>Checks{version?.checks?.ok ? <i /> : version?.checks ? <b>!</b> : null}</button></div>
           <div className="inspector-scroll">
             {tab === 'dimensions' && version ? <div className="dimensions-panel"><p className="panel-intro">A little adjustment, instantly.<br />Everything updates right here in your browser.</p>{paramEntries.filter(([, p]) => p.group === 'global').length > 0 && <div className="param-group"><h3><Icon name="sliders" size={14} /> GLOBAL DIMENSIONS</h3>{paramEntries.filter(([, p]) => p.group === 'global').map(([name, def]) => <DetailSlider key={name} name={name} def={def} value={def.value} onChange={(value) => editParam(name, value)} />)}</div>}{plan && plan.rooms.map((room) => { const entries = paramEntries.filter(([, p]) => p.group === 'room' && p.room === room.id); if (!entries.length) return null; return <div className="param-group room-group" key={room.id}><h3><span className={`floor-dot ${room.floor}`} />{room.name}<span className="room-unit">ROOM</span></h3>{entries.map(([name, def]) => <DetailSlider key={name} name={name} def={def} value={def.value} onChange={(value) => editParam(name, value)} />)}</div>; })}<div className="edit-note"><Icon name="spark" size={17} /><p>One slider. Every connected wall.<br /><span>Geometry is derived, not hardcoded.</span></p></div></div> : null}
-            {tab === 'assumptions' && version ? <div className="assumptions-panel"><p className="panel-intro">Kimi filled in what your sketch left unsaid. Each choice is yours to adjust.</p>{version.assumptions.length ? version.assumptions.map((a, i) => <article className="assumption-card" key={`${a.id}-${i}`}><div className="assumption-number">INFERRED {String(i + 1).padStart(2, '0')}</div><p>{a.text}</p>{version.params[a.param] ? <DetailSlider id={`assumption-${a.param}`} name={a.param} def={version.params[a.param]} value={version.params[a.param].value} onChange={(value) => editParam(a.param, value)} /> : <small className="muted">See plan revision notes for this assumption.</small>}</article>) : <div className="empty-panel"><Icon name="check" size={30} /><h3>Nothing left unsaid.</h3><p>No additional assumptions were reported in this version.</p></div>}</div> : null}
-            {tab === 'checks' && <div className="checks-panel"><p className="panel-intro">A little engineering you didn’t have to ask for. Deterministic, every time.</p>{activeVersion?.error && <div className="error-note"><b>Generator needs a revision</b><p>{activeVersion.error}</p></div>}{activeVersion?.verdict && <div className={`verdict ${activeVersion.verdict === 'PASS' ? 'pass' : 'revise'}`}><span>{activeVersion.verdict === 'PASS' ? <Icon name="check" size={18} /> : <Icon name="eye" size={18} />}</span><div><b>{activeVersion.verdict === 'PASS' ? 'Vision review passed' : 'Revision suggested'}</b><p>{activeVersion.verdict === 'PASS' ? 'The render and original sketch agree.' : 'Kimi found room for improvement.'}</p></div></div>}{activeVersion?.issues?.length ? <ul className="issue-list">{activeVersion.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul> : null}{version?.checks ? <div className="check-list">{version.checks.checks.map((check) => <article className={`check-card ${check.ok ? 'ok' : 'fail'}`} key={check.id} data-check={check.id} data-ok={check.ok}><span>{check.ok ? <Icon name="check" size={13} /> : '!'}</span><div><h3>{check.title}</h3><p>{check.detail}</p></div></article>)}</div> : !progress ? <div className="empty-panel"><p>Checks run as soon as a plan is built.</p></div> : null}<div className="check-footnote"><Icon name="info" size={15} /> Orientation assumed for a residential sketch. Construction always needs a professional.</div></div>}
+            {tab === 'assumptions' && version ? <div className="assumptions-panel">
+              <p className="panel-intro">Original assumptions stay verbatim. Current values are separate, so edits never rewrite what Kimi inferred.</p>
+              {version.assumptions.length ? version.assumptions.map((a, i) => {
+                const param = a.param ? version.params[a.param] : undefined;
+                const original = a.param ? version.originalParams[a.param] : undefined;
+                return <article className="assumption-card" key={`${a.id}-${i}`} data-assumption-id={a.id} data-current-value={param && a.param ? version.params[a.param].value : ''} data-original-value={original?.value ?? ''}>
+                  <div className="assumption-number">ORIGINAL ASSUMPTION {String(i + 1).padStart(2, '0')}</div>
+                  <p>{a.text}</p>
+                  {param && a.param ? <>
+                    <div className="assumption-values"><span>Kimi assumed <b>{formatMM(original?.value ?? param.value)}</b></span><span>Current <b>{formatMM(param.value)}</b></span></div>
+                    <DetailSlider id={`assumption-${a.param}`} name={a.param} def={param} value={param.value} onChange={(value) => editParam(a.param!, value)} />
+                  </> : <small className="assumption-text-only">Text-only assumption · no matching dimension to edit.</small>}
+                </article>;
+              }) : <div className="empty-panel"><Icon name="check" size={30} /><h3>Nothing left unsaid.</h3><p>No additional assumptions were reported in this version.</p></div>}
+            </div> : null}
+            {tab === 'checks' && <div className="checks-panel"><p className="panel-intro">A little engineering you didn’t have to ask for. Deterministic, every time.</p>{activeVersion?.repairs.length ? <div className="repair-notes" data-testid="repair-notes"><b>Repaired locally · no model retry</b><ul>{activeVersion.repairs.map((note, i) => <li key={i}>{note}</li>)}</ul></div> : null}{activeVersion?.error && <div className="error-note"><b>Generator needs a revision</b><p>{activeVersion.error}</p></div>}{activeVersion?.verdict && <div className={`verdict ${activeVersion.verdict === 'PASS' ? 'pass' : 'revise'}`}><span>{activeVersion.verdict === 'PASS' ? <Icon name="check" size={18} /> : <Icon name="eye" size={18} />}</span><div><b>{activeVersion.verdict === 'PASS' ? 'Vision review passed' : 'Revision suggested'}</b><p>{activeVersion.verdict === 'PASS' ? 'The render and original sketch agree.' : 'Kimi found room for improvement.'}</p></div></div>}{activeVersion?.issues?.length ? <ul className="issue-list">{activeVersion.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul> : null}{version?.checks ? <div className="check-list">{version.checks.checks.map((check) => <article className={`check-card ${check.ok ? 'ok' : 'fail'}`} key={check.id} data-check={check.id} data-ok={check.ok}><span>{check.ok ? <Icon name="check" size={13} /> : '!'}</span><div><h3>{check.title}</h3><p>{check.detail}</p></div></article>)}</div> : !progress ? <div className="empty-panel"><p>Checks run as soon as a plan is built.</p></div> : null}<div className="check-footnote"><Icon name="info" size={15} /> Orientation assumed for a residential sketch. Construction always needs a professional.</div></div>}
             {!version && !progress && <div className="empty-panel"><h3>Almost there.</h3><p>Try the original again, or start a new sketch.</p></div>}
           </div>
-          <div className="inspector-bottom"><div className="export-wrap" ref={exportRef}><button className="export-button" disabled={!plan || exporting || Boolean(progress)} onClick={() => setExportOpen(!exportOpen)}><Icon name="download" size={18} /><span>{exporting ? 'Preparing your model…' : 'Take your plan with you'}</span><Icon name="down" size={16} /></button>{exportOpen && <div className="export-menu">{[{ id: 'glb', title: '3D model', ext: '.glb', icon: 'cube' }, { id: 'json', title: 'Plan data', ext: '.json', icon: 'file' }, { id: 'js', title: 'Generator module', ext: '.js', icon: 'code' }, { id: 'svg', title: '2D floor plan', ext: '.svg', icon: 'plan' }].map((item) => <button key={item.id} onClick={() => runExport(item.id)}><Icon name={item.icon} /><span>{item.title}</span><small>{item.ext}</small><Icon name="download" size={14} /></button>)}</div>}</div><p>No account. No database. Just your plan.</p></div>
+          <div className="inspector-bottom"><div className="export-wrap" ref={exportRef}><button className="export-button" disabled={!plan || exporting} onClick={() => setExportOpen(!exportOpen)}><Icon name="download" size={18} /><span>{exporting ? 'Preparing your model…' : 'Take your plan with you'}</span><Icon name="down" size={16} /></button>{exportOpen && <div className="export-menu">{[{ id: 'glb', title: '3D model', ext: '.glb', icon: 'cube' }, { id: 'json', title: 'Plan data', ext: '.json', icon: 'file' }, { id: 'js', title: 'Generator module', ext: '.js', icon: 'code' }, { id: 'svg', title: '2D floor plan', ext: '.svg', icon: 'plan' }].map((item) => <button key={item.id} onClick={() => runExport(item.id)}><Icon name={item.icon} /><span>{item.title}</span><small>{item.ext}</small><Icon name="download" size={14} /></button>)}</div>}</div><p>No account. No database. Just your plan.</p></div>
         </aside>
       </div>
       <footer className="studio-footer"><button className="back-link" onClick={goHome}>← All sketches</button>{version?.verdict === 'PASS' ? <span className="studio-verified"><Icon name="check" size={13} /> Vision-reviewed{elapsed > 0 && ` in ${Math.round(elapsed)}s`}</span> : usage.length === 0 && plan ? <span className="studio-verified">LOCAL SAMPLE · EXPLORE FREELY</span> : <span className="studio-verified"><Icon name="spark" size={12} /> Powered by Kimi vision</span>}<div className="debug-anchor"><button className="debug-button" onClick={() => setDebugOpen(!debugOpen)}><Icon name="code" size={14} /> Debug <span>{usage.length ? `${usage.length} calls` : 'local'}</span></button>{debugOpen && <div className="debug-panel"><div className="debug-head"><b>Model telemetry</b><button onClick={() => setDebugOpen(false)}><Icon name="close" size={16} /></button></div><p>{model}</p>{usage.length ? <div className="usage-list">{usage.map((u, i) => <div key={i}><span>{u.kind}</span><b>{u.completion.toLocaleString()} tokens</b><span>{u.tokensPerSecond} tok/s · {u.elapsed}s</span></div>)}</div> : <p className="debug-empty">No model calls for the local example.<br />Worker rebuild: {paramElapsed === null ? 'not measured yet' : `${paramElapsed.toFixed(2)} ms`}.</p>}<span className="debug-note">Key stays server-side · streamed completions</span></div>}</div></footer>

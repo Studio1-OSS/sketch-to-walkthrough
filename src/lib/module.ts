@@ -14,6 +14,8 @@ export function validateGeneratorSource(source: string) {
   }
   const declarations: string[] = [];
   for (const node of ast.body) {
+    // Pure helpers may stay private; only the three public API declarations are exported.
+    if (node.type === 'FunctionDeclaration' && node.id) continue;
     if (node.type !== 'ExportNamedDeclaration' || !node.declaration) {
       throw new SourceError(`Only EXPORT const PARAMS, EXPORT const ASSUMPTIONS, and EXPORT function buildPlan are allowed (line ${node.loc?.start.line}).`);
     }
@@ -33,6 +35,7 @@ export function validateGeneratorSource(source: string) {
   walk.full(ast, (node) => {
     if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') locals.add(node.id.name);
     if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') {
+      if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') && node.id) locals.add(node.id.name);
       for (const param of node.params) {
         if (param.type !== 'Identifier') throw new SourceError('Use a simple identifier for each function parameter.');
         locals.add(param.name);
@@ -66,18 +69,52 @@ export function evaluateGenerator(source: string) {
   try { generated = make() as typeof generated; }
   catch (error) { throw new SourceError(`Module initialization failed: ${(error as Error).message}`); }
   if (typeof generated.buildPlan !== 'function') throw new SourceError('buildPlan must be a function.');
+
+  // Repair only mechanical slips. Geometry and schema failures still go back to the model.
+  const repairs: string[] = [];
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+  const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+  let rawParams = generated.PARAMS;
+  if (isRecord(rawParams)) {
+    rawParams = Object.fromEntries(Object.entries(rawParams).map(([key, value]) => {
+      if (!isRecord(value) || !finite(value.value) || !finite(value.min) || !finite(value.max) || value.min >= value.max) return [key, value];
+      const clamped = Math.min(value.max, Math.max(value.min, value.value));
+      if (clamped !== value.value) repairs.push(`PARAMS.${key}: clamped ${value.value} to ${clamped}, within [${value.min}, ${value.max}].`);
+      return [key, { ...value, value: clamped }];
+    }));
+  }
+  const params = paramsSchema.parse(rawParams) as Record<string, ParamDef>;
+  let rawAssumptions = generated.ASSUMPTIONS;
+  if (Array.isArray(rawAssumptions)) {
+    const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+    rawAssumptions = rawAssumptions.map((value, index) => {
+      if (!isRecord(value) || value.param !== undefined) return value;
+      const id = typeof value.id === 'string' ? normalize(value.id) : '';
+      const matches = Object.keys(params).filter((key) => {
+        const candidate = normalize(key);
+        return id && (candidate === id || (id.length >= 4 && (id.includes(candidate) || candidate.includes(id))));
+      });
+      if (matches.length === 1) {
+        repairs.push(`ASSUMPTIONS[${index}]: linked missing param to ${matches[0]} by name.`);
+        return { ...value, param: matches[0] };
+      }
+      repairs.push(`ASSUMPTIONS[${index}]: no unambiguous PARAMS match; kept as a text-only assumption.`);
+      return value;
+    });
+  }
   return {
-    params: paramsSchema.parse(generated.PARAMS) as Record<string, ParamDef>,
-    assumptions: assumptionsSchema.parse(generated.ASSUMPTIONS) as Assumption[],
+    params,
+    assumptions: assumptionsSchema.parse(rawAssumptions) as Assumption[],
     buildPlan: generated.buildPlan as (values: ParamValues) => unknown,
+    repairs,
   };
 }
 
-export function buildFromModule(source: string, values?: ParamValues): { plan: PlanSpec; params: Record<string, ParamDef>; assumptions: Assumption[] } {
-  const { params, assumptions, buildPlan } = evaluateGenerator(extractModule(source));
+export function buildFromModule(source: string, values?: ParamValues): { plan: PlanSpec; params: Record<string, ParamDef>; assumptions: Assumption[]; repairs: string[] } {
+  const { params, assumptions, buildPlan, repairs } = evaluateGenerator(extractModule(source));
   const input = { ...Object.fromEntries(Object.entries(params).map(([key, p]) => [key, p.value])), ...values };
   const plan = planSchema.parse(buildPlan(input));
-  return { plan, params, assumptions };
+  return { plan, params, assumptions, repairs };
 }
 
 export function extractModule(text: string): string {

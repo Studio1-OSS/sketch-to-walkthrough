@@ -15,9 +15,10 @@ COORDINATE CONTRACT
 - All PlanSpec coordinates, wall thicknesses, openings, and dimensions are millimetres. Origin is bottom-left. Y increases upward on paper. wallHeight will become vertical Y in 3D.
 - Read every written dimension carefully. Convert m to 1000 mm, cm to 10 mm, mm to 1 mm, ft to 304.8 mm (inches are 25.4 mm). Prefer the exact dimension written near a wall over estimating pixels.
 - Infer overall envelope and topological relationships from the sketch. Do not copy visual proportions when they contradict written dimensions.
-- Every written dimension and every useful adjustable dimension is one flat PARAMS entry. Names like living_width, kitchen_depth, hall_width, wall_height. Do not nest numeric parameters. Use only numbers inside PARAMS objects; no expressions in values or bounds. min < value < max always. Give realistic narrow bounds, not giant ranges.
+- Every written dimension and every useful adjustable dimension is one flat PARAMS entry. Names like living_width, kitchen_depth, hall_width, wall_height. Do not nest numeric parameters. Use only numbers inside PARAMS objects; no expressions in values or bounds. min <= value <= max and min < max always. Give realistic narrow bounds, not giant ranges.
 - Every PARAMS entry has group "global" or "room". A room parameter also has a room that matches the room ID and a clear human-readable label. Keep the set focused: global and room dimensions, not a slider for redundant x/y coordinates.
 - buildPlan receives P = { param_name: number, ... }. Derive every wall, polygon, opening, and entry from P, never hardcode fixed dimensions you put in PARAMS. Only pure JavaScript, Math, and Number are allowed. No DOM, network, imports, external calls, ambient globals, mutation of P, new Function, or async. Return a complete fresh object, quickly.
+- SOURCE WHITELIST: Use simple identifier parameters only: no default, rest, or destructured parameters in any function or helper. No assignment or update expressions anywhere, including `o.sill = value`, `+=`, or `++`; initialize every object with its complete literal instead of assigning properties later. Local const declarations and array `.push(...)` are allowed.
 - At every slider value in [min,max], maintain the exterior loop, all openings, and room connections. Design coupled dimensions so dependent walls move together. Keep the overall exterior constant if the drawing fixes it; derive other room widths from it instead of overlapping rooms.
 
 PLANSPEC (exact field names; no additional objects are returned)
@@ -41,5 +42,9 @@ ENGINEERING RULES
 - IDs are unique across walls, rooms, and openings. Prefer simple ASCII IDs.
 - Wall height defaults to 2700, exterior thickness 200, interior thickness 120, interior doors 900, entry door 900, window sill 900. If the sketch is silent, list these as assumptions, each linked to an editable parameter. Also include door/window placements or floor finishes if inferred.
 - Floors: wood is the sensible default, tile in kitchens/baths, carpet in bedrooms only if a plausible design choice. Do not invent fixtures, textures, decorative furniture, or complex dimensions.
+
+OUTPUT SIZE
+- Keep the module compact: no comments, blank-line padding, repeated object literals, or redundant coordinate parameters.
+- Prefer a few focused, independent dimensions and derive the rest. Use small helper functions for repeated walls, rooms, and openings. Do not repeat wall construction code when a helper can express it.
 
 Review the complete final module mentally before answering. Confirm every opening fits, room polygons don't overlap, and doors connect the layout. Return only code.

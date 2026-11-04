@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "samples": "node scripts/generate-samples.mjs",
     "qa": "node scripts/browser-check.mjs",
-    "verify:model": "node scripts/model-check.mjs"
+    "verify:model": "node scripts/model-check.mjs",
+    "verify:generation": "node scripts/generation-check.mjs"
   },
   "dependencies": {
     "acorn": "^8.15.0",

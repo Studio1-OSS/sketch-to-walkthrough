@@ -39,8 +39,8 @@ export const paramSchema = z.object({
   group: z.enum(['global', 'room']).default('global'),
   room: z.string().max(80).optional(),
   label: z.string().max(100).optional(),
-}).refine((p) => p.min > 0 && p.max > p.value && p.value > p.min, {
-  message: 'Each parameter needs min < value < max.',
+}).refine((p) => p.min > 0 && p.min < p.max && p.value >= p.min && p.value <= p.max, {
+  message: 'Each parameter needs min <= value <= max and min < max.',
 });
 export type ParamDef = z.infer<typeof paramSchema>;
 export const paramsSchema = z.record(z.string(), paramSchema)
@@ -49,7 +49,7 @@ export const paramsSchema = z.record(z.string(), paramSchema)
 export const assumptionSchema = z.object({
   id: z.string().min(1).max(80),
   text: z.string().min(1).max(500),
-  param: z.string().min(1).max(80),
+  param: z.string().min(1).max(80).optional(),
 });
 export type Assumption = z.infer<typeof assumptionSchema>;
 export const assumptionsSchema = z.array(assumptionSchema).max(100);

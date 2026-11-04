@@ -4,7 +4,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { buildWorld, disposeWorld } from '../lib/world';
 import { planBounds } from '../lib/plan-svg';
-import { pointSegmentDistance, runChecks } from '../lib/checks';
+import { runChecks } from '../lib/checks';
+import { collides, getWalkSpawn, minimumWallDistance } from '../lib/walkthrough';
 import type { PlanSpec } from '../lib/plan';
 
 export type ViewMode = 'plan' | 'dollhouse' | 'walk';
@@ -14,18 +15,6 @@ export type ViewerHandle = {
   setJoystick: (x: number, y: number) => void;
 };
 type Props = { plan: PlanSpec; mode: ViewMode; labels: boolean; onLocked?: (locked: boolean) => void; className?: string };
-
-function collides(p: [number, number], plan: PlanSpec) {
-  const radius = 210;
-  return plan.walls.some((wall) => {
-    if (pointSegmentDistance(p, wall.a, wall.b) >= radius + wall.thickness / 2) return false;
-    const length = Math.hypot(wall.b[0] - wall.a[0], wall.b[1] - wall.a[1]);
-    const dx = (wall.b[0] - wall.a[0]) / length, dy = (wall.b[1] - wall.a[1]) / length;
-    const along = (p[0] - wall.a[0]) * dx + (p[1] - wall.a[1]) * dy;
-    const opening = plan.openings.find((o) => o.wallId === wall.id && o.type !== 'window' && along > o.offset + radius && along < o.offset + o.width - radius);
-    return !opening;
-  });
-}
 
 export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ plan, mode, labels, onLocked, className = '' }, forwardedRef) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -53,7 +42,7 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
     sun.shadow.normalBias = 0.03; sun.shadow.bias = -0.00015; sun.shadow.radius = 3; scene.add(sun);
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), new THREE.MeshStandardMaterial({ color: '#e4e8df', roughness: 1 }));
     ground.rotation.x = -Math.PI / 2; ground.position.y = -0.025; ground.receiveShadow = true; scene.add(ground);
-    const world = buildWorld(stateRef.current.plan, { labels: stateRef.current.labels, ceiling: stateRef.current.mode === 'walk' });
+    const world = buildWorld(stateRef.current.plan, { labels: stateRef.current.labels, ceiling: stateRef.current.mode === 'walk', walkthrough: stateRef.current.mode === 'walk' });
     world.userData = { plan: stateRef.current.plan, labels: stateRef.current.labels, ceiling: stateRef.current.mode === 'walk' }; scene.add(world);
     const top = new THREE.OrthographicCamera(-6, 6, 6, -6, 0.01, 250); top.up.set(0, 0, -1);
     const doll = new THREE.PerspectiveCamera(36, 1, 0.05, 250);
@@ -79,12 +68,21 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
     renderer.domElement.addEventListener('pointerdown', down); renderer.domElement.addEventListener('pointermove', move); renderer.domElement.addEventListener('pointerup', up);
     const r = { scene, renderer, orbit, pointer, top, doll, walk, world, keys, joystick: { x: 0, y: 0 }, applyMode: () => {} };
     runtime.current = r;
+    const placeWalk = () => {
+      const plan = stateRef.current.plan;
+      const spawn = getWalkSpawn(plan);
+      walk.position.set(spawn.position[0] / 1000, 1.6, -spawn.position[1] / 1000);
+      walk.rotation.set(0, -THREE.MathUtils.degToRad(spawn.facing), 0, 'YXZ');
+      host.dataset.spawn = spawn.position.map(Math.round).join(',');
+      host.dataset.spawnRoom = spawn.roomId;
+      host.dataset.spawnClearance = String(Math.round(spawn.clearance));
+      host.dataset.spawnWallDistance = String(Math.round(minimumWallDistance(spawn.position, plan)));
+    };
     const reset = () => {
       const b = planBounds(stateRef.current.plan), cx = (b.minX + b.maxX) / 2000, cz = -(b.minY + b.maxY) / 2000, span = Math.max(b.width, b.height) / 1000;
       top.position.set(cx, span * 2, cz); top.lookAt(cx, 0, cz);
       doll.position.set(cx + span * 1.02, span * 1.18, cz + span * 1.25); orbit.target.set(cx, 0.4, cz); orbit.update();
-      walk.position.set(stateRef.current.plan.entry.position[0] / 1000, 1.6, -stateRef.current.plan.entry.position[1] / 1000);
-      walk.rotation.set(0, -THREE.MathUtils.degToRad(stateRef.current.plan.entry.facing), 0, 'YXZ');
+      placeWalk();
       if (resize) resize();
     };
     const resize = () => {
@@ -94,16 +92,25 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
       const half = Math.max(b.height / 2000, b.width / 2000 / aspect) + 0.7;
       top.left = -half * aspect; top.right = half * aspect; top.top = half; top.bottom = -half; top.updateProjectionMatrix();
       doll.aspect = aspect; doll.updateProjectionMatrix(); walk.aspect = aspect; walk.updateProjectionMatrix();
+      const camera = stateRef.current.mode === 'walk' ? walk : stateRef.current.mode === 'dollhouse' ? doll : top;
+      r.world.traverse((object) => {
+        if (!(object instanceof THREE.Sprite) || !object.userData.roomLabel) return;
+        if (camera instanceof THREE.PerspectiveCamera) {
+          const factor = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / height;
+          object.scale.set(210 * factor, 46 * factor, 1);
+        } else {
+          object.scale.set(210 * (camera.right - camera.left) / width, 46 * (camera.top - camera.bottom) / height, 1);
+        }
+      });
+      host.dataset.labelsOccluded = String(stateRef.current.mode === 'walk');
     };
     const observer = new ResizeObserver(resize); observer.observe(host); resize(); reset();
     r.applyMode = () => {
       const currentMode = stateRef.current.mode;
       orbit.enabled = currentMode !== 'walk'; orbit.enableRotate = currentMode === 'dollhouse'; orbit.object = currentMode === 'plan' ? top : doll;
       if (currentMode !== 'walk' && pointer.isLocked) pointer.unlock();
-      if (currentMode === 'walk') {
-        walk.position.set(stateRef.current.plan.entry.position[0] / 1000, 1.6, -stateRef.current.plan.entry.position[1] / 1000);
-        walk.rotation.set(0, -THREE.MathUtils.degToRad(stateRef.current.plan.entry.facing), 0, 'YXZ');
-      } else reset();
+      if (currentMode === 'walk') { placeWalk(); resize(); }
+      else reset();
     };
     r.applyMode();
     handleRef.current = {
@@ -151,7 +158,7 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
     const ceiling = mode === 'walk';
     if (r.world.userData.plan === plan && r.world.userData.labels === labels && r.world.userData.ceiling === ceiling) return;
     disposeWorld(r.world); r.scene.remove(r.world);
-    const world = buildWorld(plan, { labels, ceiling }); world.userData = { plan, labels, ceiling }; r.world = world; r.scene.add(world);
+    const world = buildWorld(plan, { labels, ceiling, walkthrough: mode === 'walk' }); world.userData = { plan, labels, ceiling }; r.world = world; r.scene.add(world);
     r.applyMode();
   }, [plan, labels, mode]);
 

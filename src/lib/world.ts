@@ -27,18 +27,22 @@ function textureFor(floor: PlanSpec['rooms'][number]['floor']) {
   return texture;
 }
 
-function labelSprite(text: string) {
+function labelSprite(text: string, walkthrough: boolean) {
   const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 112;
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#173e37e8'; ctx.beginPath(); ctx.roundRect(75, 10, 362, 82, 28); ctx.fill();
   ctx.font = '500 29px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#f5f7ed'; ctx.fillText(text, 256, 53, 320);
   const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthTest: false, depthWrite: false }));
-  sprite.scale.set(1.65, 0.36, 1); sprite.renderOrder = 5;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map, transparent: true, depthTest: walkthrough, depthWrite: false, sizeAttenuation: false,
+    // Give a directly-visible room label priority over its floor, never over a nearer wall.
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+  }));
+  sprite.userData.roomLabel = true; sprite.renderOrder = walkthrough ? 0 : 5;
   return sprite;
 }
 
-export function buildWorld(plan: PlanSpec, options: { labels?: boolean; ceiling?: boolean } = {}) {
+export function buildWorld(plan: PlanSpec, options: { labels?: boolean; ceiling?: boolean; walkthrough?: boolean } = {}) {
   const group = new THREE.Group(); group.name = 'Sketch to Walkthrough';
   const height = plan.wallHeight;
   const box = (parent: THREE.Object3D, width: number, h: number, depth: number, x: number, y: number, material = wallMat) => {
@@ -57,7 +61,9 @@ export function buildWorld(plan: PlanSpec, options: { labels?: boolean; ceiling?
       ceiling.scale.set(0.001, 1, 0.001); ceiling.position.y = height / 1000; ceiling.name = `${room.name} ceiling`; group.add(ceiling);
     }
     if (options.labels) {
-      const label = labelSprite(room.name); label.position.copy(toWorld(roomCenter(room.polygon), 1800)); group.add(label);
+      const label = labelSprite(room.name, options.walkthrough ?? false);
+      label.name = `${room.name} label`; label.userData.roomId = room.id;
+      label.position.copy(toWorld(roomCenter(room.polygon), 1800)); group.add(label);
     }
   }
   const frameMaterial = new THREE.MeshStandardMaterial({ color: FRAME, roughness: 0.58 });

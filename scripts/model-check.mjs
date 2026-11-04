@@ -26,14 +26,25 @@ page.on('response', async (response) => {
     if (body.error) console.error('  API error:', body.error);
   } catch (error) { errors.push(String(error)); }
 });
-const started = Date.now();
+let started = 0, firstWalkableWallSeconds = null, firstWalkableAppSeconds = null, health = null;
 try {
   await page.goto(BASE, { waitUntil: 'networkidle', timeout: 60000 });
+  health = await page.evaluate(async () => (await fetch('/api/health')).json());
   await page.waitForSelector('.hero-model .viewer-host[data-ready="true"]', { timeout: 45000 });
+  started = Date.now();
   await page.getByRole('button', { name: 'Generate walkthrough from The two-bedroom', exact: true }).click();
   await page.waitForSelector('.generation-overlay', { state: 'visible', timeout: 20000 });
-  console.log('Real generation request started; waiting for complete client loop.');
-  await page.waitForSelector('.generation-overlay', { state: 'hidden', timeout: 1200000 });
+  console.log('Real generation request started; waiting for the first valid version.');
+  await page.waitForFunction(() => { const studio = document.querySelector('.studio'); return Number(studio?.dataset.firstWalkable) > 0 || Number(studio?.dataset.finalElapsed) > 0; }, undefined, { timeout: 1200000 });
+  const firstWalkable = await page.locator('.studio').getAttribute('data-first-walkable');
+  if (firstWalkable) {
+    firstWalkableWallSeconds = (Date.now() - started) / 1000;
+    firstWalkableAppSeconds = Number(firstWalkable);
+    console.log(`FIRST WALKABLE VERSION in ${firstWalkableWallSeconds.toFixed(1)}s wall / ${firstWalkableAppSeconds.toFixed(1)}s app.`);
+    await page.screenshot({ path: path.join(OUT, 'live-first-walkable.png') });
+  }
+  await page.waitForFunction(() => Number(document.querySelector('.studio')?.dataset.finalElapsed) > 0, undefined, { timeout: 1200000 });
+  await page.waitForSelector('.generation-overlay', { state: 'hidden', timeout: 1000 });
   await page.waitForTimeout(1800);
   const wallSeconds = (Date.now() - started) / 1000;
   console.log(`LIVE LOOP FINISHED in ${wallSeconds.toFixed(1)}s. ${calls.length} real model requests.`);
@@ -50,7 +61,7 @@ try {
     versions.push({ version: v, button: verdict, engineeringState: await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks'), checks });
     await page.screenshot({ path: path.join(OUT, `live-v${v}-checks.png`) });
   }
-  await page.locator('.version-button').last().click();
+  await page.locator('.version-button:not(.invalid)').last().click();
   await page.getByRole('tab', { name: 'Dollhouse', exact: true }).click(); await page.waitForTimeout(500);
   await page.screenshot({ path: path.join(OUT, 'live-final-dollhouse.png') });
   await page.getByRole('tab', { name: 'Walkthrough', exact: true }).click(); await page.waitForTimeout(400);
@@ -61,13 +72,13 @@ try {
   await page.keyboard.press('Escape');
   await page.evaluate(() => { if (document.pointerLockElement) document.exitPointerLock(); });
   await page.locator('.debug-button').click(); await page.waitForTimeout(200); await page.screenshot({ path: path.join(OUT, 'live-debug.png') });
-  const results = { date: new Date().toISOString(), model: calls[0]?.model, realModelCalls: calls.length, wallSeconds, versions, errors, calls };
+  const results = { date: new Date().toISOString(), model: calls[0]?.model, health, realModelCalls: calls.length, firstWalkableWallSeconds, firstWalkableAppSeconds, wallSeconds, versions, errors, calls };
   fs.writeFileSync(path.join(OUT, 'model-verification.json'), JSON.stringify(results, null, 2));
   console.log(`Saved real run: screenshots/model-verification.json; ${versions.length} versions; ${errors.length} captured errors.`);
   if (!calls.length || errors.length || !versions.length) process.exitCode = 1;
 } catch (error) {
   console.error(error);
-  fs.writeFileSync(path.join(OUT, 'model-verification.json'), JSON.stringify({ date: new Date().toISOString(), wallSeconds: (Date.now() - started) / 1000, errors: [...errors, String(error)], incomplete: true, calls }, null, 2));
+  fs.writeFileSync(path.join(OUT, 'model-verification.json'), JSON.stringify({ date: new Date().toISOString(), wallSeconds: started ? (Date.now() - started) / 1000 : 0, firstWalkableWallSeconds, firstWalkableAppSeconds, health, errors: [...errors, String(error)], incomplete: true, calls }, null, 2));
   await page.screenshot({ path: path.join(OUT, 'model-flow-error.png') });
   process.exitCode = 1;
 } finally { await browser.close(); }

@@ -3,6 +3,7 @@ import { SAMPLE_SOURCE } from './sample';
 import { buildFromModule, SourceError, validateGeneratorSource } from './module';
 import { planSchema } from './plan';
 import { runChecks } from './checks';
+import { collides, getWalkSpawn, minimumWallDistance } from './walkthrough';
 
 const { plan } = buildFromModule(SAMPLE_SOURCE);
 const copy = () => structuredClone(plan);
@@ -40,8 +41,38 @@ describe('sandbox source validation', () => {
   it('rejects missing exports', () => {
     expect(() => buildFromModule('export const PARAMS = {}')).toThrow(SourceError);
   });
-  it('rejects invalid parameter ranges', () => {
-    expect(() => buildFromModule(SAMPLE_SOURCE.replace('value: 2700, min: 2400', 'value: 1200, min: 2400'))).toThrow();
+  it('rejects structurally invalid parameter ranges', () => {
+    expect(() => buildFromModule(SAMPLE_SOURCE.replace('value: 2700, min: 2400', 'value: 2700, min: 3400'))).toThrow();
+  });
+  it.each([2400, 3400])('accepts a parameter exactly at an inclusive bound (%s)', (value) => {
+    const result = buildFromModule(SAMPLE_SOURCE, { wall_height: value });
+    expect(result.plan.wallHeight).toBe(value);
+  });
+  it('clamps a parameter locally and records the repair', () => {
+    const result = buildFromModule(SAMPLE_SOURCE.replace('value: 2700, min: 2400', 'value: 3600, min: 2400'));
+    expect(result.params.wall_height.value).toBe(3400);
+    expect(result.plan.wallHeight).toBe(3400);
+    expect(result.repairs.join()).toContain('clamped 3600 to 3400');
+  });
+  it('links a missing assumption param by name and records the repair', () => {
+    const result = buildFromModule(SAMPLE_SOURCE.replace(', param: "wall_height"', ''));
+    expect(result.assumptions[0].param).toBe('wall_height');
+    expect(result.repairs.join()).toContain('linked missing param to wall_height');
+  });
+  it('keeps an unmatched missing assumption param as text only', () => {
+    const source = SAMPLE_SOURCE.replace('{ id: "height",', '{ id: "unmatched_note",').replace(', param: "wall_height"', '');
+    const result = buildFromModule(source);
+    expect(result.assumptions[0].param).toBeUndefined();
+    expect(result.repairs.join()).toContain('text-only assumption');
+  });
+  it('allows pure nested named helper declarations', () => {
+    const source = SAMPLE_SOURCE.replace('const wall = (id, a, b, thickness, exterior) => ({ id, a, b, thickness, exterior });', 'function wall(id, a, b, thickness, exterior) { return { id, a, b, thickness, exterior }; }');
+    expect(buildFromModule(source).plan.walls).toHaveLength(10);
+  });
+  it('allows private pure helpers at module scope while preserving exact exports', () => {
+    const helper = 'function wall(id, a, b, thickness, exterior) { return { id, a, b, thickness, exterior }; }\n';
+    const source = SAMPLE_SOURCE.replace('  const wall = (id, a, b, thickness, exterior) => ({ id, a, b, thickness, exterior });\n', '').replace('export function buildPlan', `${helper}export function buildPlan`);
+    expect(buildFromModule(source).plan.walls).toHaveLength(10);
   });
   it('rebuilds all geometry from changed parameters', () => {
     const result = buildFromModule(SAMPLE_SOURCE, { hall_width: 1400 });
@@ -50,6 +81,23 @@ describe('sandbox source validation', () => {
   it('extracts a fenced JavaScript module', () => {
     const result = buildFromModule(`Here is the plan:\n\`\`\`javascript\n${SAMPLE_SOURCE}\n\`\`\``);
     expect(result.plan.walls).toHaveLength(10);
+  });
+});
+
+describe('walkthrough spawn', () => {
+  it('moves the narrow-hall entry into a collision-free room with wall clearance', () => {
+    const spawn = getWalkSpawn(plan);
+    expect(spawn.roomId).not.toBe('hall');
+    expect(collides(spawn.position, plan)).toBe(false);
+    expect(spawn.clearance).toBeGreaterThanOrEqual(1000);
+    expect(minimumWallDistance(spawn.position, plan)).toBeGreaterThanOrEqual(900);
+  });
+  it('faces toward a room sight line and leaves the PlanSpec entry unchanged', () => {
+    const original = structuredClone(plan.entry);
+    const spawn = getWalkSpawn(plan);
+    expect(spawn.facing).toBeGreaterThanOrEqual(0);
+    expect(spawn.facing).toBeLessThan(360);
+    expect(plan.entry).toEqual(original);
   });
 });
 
