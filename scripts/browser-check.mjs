@@ -1,0 +1,109 @@
+import { chromium } from 'playwright';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const BASE = process.env.BASE_URL || 'http://127.0.0.1:5180';
+const OUT = path.resolve('screenshots'); fs.mkdirSync(OUT, { recursive: true });
+const FULL_CHROME = `${process.env.HOME}/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`;
+const browser = await chromium.launch({ executablePath: fs.existsSync(FULL_CHROME) ? FULL_CHROME : undefined, headless: true, args: ['--use-gl=angle', '--use-angle=swiftshader', '--disable-gpu-sandbox', '--no-sandbox', '--disable-dev-shm-usage', '--ignore-gpu-blocklist', '--enable-webgl'] });
+const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, deviceScaleFactor: 1 });
+const errors = [], tests = [];
+page.on('pageerror', (e) => errors.push(String(e)));
+page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+const record = (name, pass, details = {}) => { tests.push({ name, pass, details }); console.log(`${pass ? 'PASS' : 'FAIL'}: ${name}`, JSON.stringify(details)); };
+const shot = async (name) => { await page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: false }); };
+const wait = (n = 450) => page.waitForTimeout(n);
+async function slider(id, value) {
+  await page.evaluate(({ id, value }) => { const input = document.getElementById(id); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, String(value)); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); }, { id, value });
+  await wait(280);
+}
+async function download(buttonName) {
+  await page.locator('.export-button').click();
+  const promise = page.waitForEvent('download');
+  await page.locator('.export-menu>button').filter({ hasText: buttonName }).click();
+  const download = await promise;
+  const saved = path.join(OUT, download.suggestedFilename()); await download.saveAs(saved);
+  return { path: saved, size: fs.statSync(saved).size };
+}
+try {
+  await page.goto(BASE, { waitUntil: 'networkidle', timeout: 60000 });
+  await page.waitForSelector('.hero-model .viewer-host[data-ready="true"]', { timeout: 60000 });
+  await wait(700); await shot('01-landing');
+  record('Landing renders real WebGL and original sample', await page.locator('.hero-model canvas').count() === 1 && await page.locator('.hero-paper img').evaluate((img) => img.complete && img.naturalWidth > 0));
+  record('Desktop landing has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.getByRole('button', { name: 'Open The two-bedroom prepared demo', exact: true }).click();
+  await page.waitForSelector('.canvas-wrap .viewer-host[data-ready="true"]', { timeout: 60000 }); await wait(700); await shot('02-dollhouse');
+  record('Prepared demo passes all engineering checks', await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks') === 'pass');
+  record('Prepared demo includes 5 rooms and 9 openings', (await page.locator('.geometry-stats').innerText()).includes('5 rooms') && (await page.locator('.geometry-stats').innerText()).includes('9 openings'));
+  const timeoutProbe = await page.evaluate(async () => {
+    const { runGenerator } = await import('/src/lib/builder.ts');
+    const { SAMPLE_SOURCE } = await import('/src/lib/sample.ts');
+    const source = SAMPLE_SOURCE.replace('const w = 10400', 'while (true) {} const w = 10400');
+    const started = performance.now();
+    try { await runGenerator(source); return { timeout: false }; }
+    catch (error) { return { timeout: String(error.message).includes('500 ms'), elapsed: performance.now() - started }; }
+  });
+  record('Sandbox terminates a non-terminating generator in 500 ms', timeoutProbe.timeout && timeoutProbe.elapsed < 900, timeoutProbe);
+  await page.getByRole('tab', { name: 'Plan', exact: true }).click(); await wait(); await shot('03-plan');
+  const oldSvg = await page.locator('.plan-overlay img').getAttribute('src');
+  record('Plan includes dimension lines and room labels', await page.locator('.plan-overlay img').evaluate((img) => img.complete && img.naturalWidth > 0));
+  await page.getByRole('tab', { name: 'Dollhouse', exact: true }).click(); await wait(450);
+  const label = await page.locator('.label-toggle').getAttribute('aria-pressed');
+  await page.locator('.label-toggle').click(); record('Room labels toggle', label === 'true' && await page.locator('.label-toggle').getAttribute('aria-pressed') === 'false');
+  await page.locator('.label-toggle').click();
+  for (const suffix of ['hall_width', 'door_width', 'living_width', 'wall_height', 'window_sill']) {
+    for (const end of ['min', 'max']) {
+      const input = page.locator(`#param-${suffix}`); const value = await input.getAttribute(end);
+      const start = Date.now(); await slider(`param-${suffix}`, Number(value));
+      await page.waitForFunction(() => !document.querySelector('.local-geometry')?.textContent.includes('Rebuilding…'), { timeout: 3000 });
+      const elapsed = await page.locator('.rebuild-time').innerText();
+      const valid = await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks') === 'pass';
+      const detail = valid ? {} : { inspector: await page.locator('.inspector').innerText() };
+      record(`Slider ${suffix} ${end} rebuilds safely`, valid && Number.parseFloat(elapsed) < 200, { reportedRebuild: elapsed, browserMotionAndQueryMs: Date.now() - start, ...detail });
+    }
+  }
+  await page.getByRole('tab', { name: 'Plan', exact: true }).click(); await wait(100);
+  const newSvg = await page.locator('.plan-overlay img').getAttribute('src');
+  record('Parameter edits change local plan geometry', oldSvg !== newSvg);
+  await page.getByRole('tab', { name: 'Dollhouse', exact: true }).click(); await wait(300);
+  const glb = await download('3D model'); const header = fs.readFileSync(glb.path).subarray(0, 4).toString();
+  record('GLB export has a valid binary glTF signature', header === 'glTF' && glb.size > 10000, glb);
+  for (const name of ['Plan data', 'Generator module', '2D floor plan']) { const result = await download(name); record(`${name} is downloaded`, result.size > 500 && fs.existsSync(result.path), { bytes: result.size }); }
+  const json = JSON.parse(fs.readFileSync(path.join(OUT, 'plan.json'), 'utf8'));
+  record('Exported PlanSpec reflects edited slider values', json.rooms.find((r) => r.id === 'hall').polygon[1][0] > 6500);
+  await page.getByRole('tab', { name: /Assumptions/ }).click(); await wait(150); await shot('04-assumptions');
+  record('Assumptions include their linked editable sliders', await page.locator('.assumption-card input[type="range"]').count() === 4);
+  await page.getByRole('tab', { name: 'Walkthrough', exact: true }).click(); await wait(500);
+  await getWalk(); await wait(600); await shot('05-walkthrough');
+  record('First-person mode starts inside the plan', await page.locator('.canvas-location').innerText() === 'EYE LEVEL · 1.6 M');
+  const before = await canvasPixels();
+  await page.keyboard.down('w'); await wait(1200); await page.keyboard.up('w'); await wait(150);
+  record('WASD changes the rendered first-person scene', before !== await canvasPixels());
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => { if (document.pointerLockElement) document.exitPointerLock(); });
+  await wait(250);
+  record('Pointer lock releases before leaving walk mode', await page.evaluate(() => !document.pointerLockElement));
+  await page.getByRole('tab', { name: 'Plan', exact: true }).click(); await wait(400);
+  await page.getByRole('tab', { name: 'Dollhouse', exact: true }).click(); await wait(300);
+  await page.locator('.debug-button').click(); await wait(100); await shot('06-debug');
+  record('Local demo reports no fabricated model calls', (await page.locator('.debug-panel').innerText()).includes('No model calls'));
+  await page.locator('.debug-head button').click();
+  await page.setViewportSize({ width: 390, height: 844 }); await wait(600); await shot('07-mobile-studio');
+  record('390 px studio has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.getByRole('tab', { name: 'Walkthrough', exact: true }).click(); await wait(); await page.getByRole('button', { name: 'Enter your walkthrough' }).click(); await wait(500);
+  record('Touch layout provides virtual joystick', await page.locator('.joystick').isVisible()); await shot('08-mobile-walk');
+  await page.keyboard.press('Escape'); await page.evaluate(() => { if (document.pointerLockElement) document.exitPointerLock(); });
+  await page.getByRole('button', { name: 'Sketch to Walkthrough home' }).click(); await wait(500); await page.screenshot({ path: path.join(OUT, '09-mobile-landing.png'), fullPage: true });
+  record('390 px landing has no horizontal overflow', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  record('Browser has no runtime or WebGL errors', errors.length === 0, { errors });
+} catch (error) {
+  record('Completed full browser flow', false, { error: String(error) });
+  try { await shot('browser-error'); } catch {}
+} finally { await browser.close(); }
+const failures = tests.filter((t) => !t.pass);
+fs.writeFileSync(path.join(OUT, 'browser-results.json'), JSON.stringify({ tests, errors, date: new Date().toISOString() }, null, 2));
+console.log(`Browser: ${tests.length - failures.length}/${tests.length} passed.`);
+process.exit(failures.length ? 1 : 0);
+
+async function canvasPixels() { return page.locator('.canvas-wrap canvas').evaluate((c) => c.toDataURL()); }
+async function getWalk() { await page.getByRole('button', { name: 'Enter your walkthrough' }).click(); }

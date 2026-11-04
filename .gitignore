@@ -4,3 +4,5 @@ dist/
 .gstack/
 screenshots/
 .DS_Store
+*.tsbuildinfo
+.vite/
