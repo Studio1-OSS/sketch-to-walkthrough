@@ -16,11 +16,11 @@
     "verify:generation": "node scripts/generation-check.mjs"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.6",
     "acorn": "^8.15.0",
     "acorn-walk": "^8.3.4",
     "dotenv": "^17.2.3",
     "hono": "^4.10.6",
-    "@hono/node-server": "^1.19.7",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "three": "^0.180.0",
