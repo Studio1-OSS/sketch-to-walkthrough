@@ -4,7 +4,7 @@ import { roomCenter, type PlanSpec } from './plan';
 export type LabelLayout = { center: Point; nameLines: string[]; area: string; fontSize: number; maxWidthMM: number };
 
 /** Pick an interior anchor and fit text before relying on the polygon clip as a final guard. */
-export function roomLabelLayout(room: PlanSpec['rooms'][number], pixelsPerMM: number, preferred = 20): LabelLayout {
+export function roomLabelLayout(room: PlanSpec['rooms'][number], pixelsPerMM: number, preferred = 18): LabelLayout {
   const polygon = room.polygon as Point[], center = interiorAnchor(polygon);
   const clearance = Math.min(...polygon.map((a, i) => pointSegmentDistance(center, a, polygon[(i + 1) % polygon.length])));
   const widthAtAnchor = horizontalSpan(polygon, center[1]);
@@ -13,6 +13,10 @@ export function roomLabelLayout(room: PlanSpec['rooms'][number], pixelsPerMM: nu
   const area = `${(polygonArea(polygon) / 1e6).toFixed(1)} m²`;
   for (const abbreviate of [false, true]) {
     const name = abbreviate ? shorten(room.name) : room.name;
+    // Fit on one line before adding lines; only abbreviate after wrapping also fails.
+    for (let fontSize = preferred; fontSize >= 8; fontSize--) {
+      if (textWidth(name, fontSize) <= maxPixels && textWidth(area, fontSize * 0.78) <= maxPixels) return { center, nameLines: [name], area, fontSize, maxWidthMM };
+    }
     for (let fontSize = preferred; fontSize >= 7; fontSize--) {
       const lines = wrap(name, maxPixels, fontSize);
       if (lines.length <= 3 && lines.every((line) => textWidth(line, fontSize) <= maxPixels) && textWidth(area, fontSize * 0.78) <= maxPixels) return { center, nameLines: lines, area, fontSize, maxWidthMM };
@@ -25,7 +29,9 @@ export function roomLabelLayout(room: PlanSpec['rooms'][number], pixelsPerMM: nu
 export function interiorAnchor(polygon: Point[]): Point {
   const center = roomCenter(polygon), xs = polygon.map((p) => p[0]), ys = polygon.map((p) => p[1]);
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-  let best = pointInPolygon(center, polygon, false) ? center : [(minX + maxX) / 2, (minY + maxY) / 2] as Point;
+  const boxCenter: Point = [(minX + maxX) / 2, (minY + maxY) / 2];
+  // An exterior bounding-box centre may lie in a concave notch; only use an actual interior fallback.
+  let best = pointInPolygon(center, polygon, false) ? center : pointInPolygon(boxCenter, polygon, false) ? boxCenter : polygon[0];
   const score = (p: Point) => Math.min(...polygon.map((a, i) => pointSegmentDistance(p, a, polygon[(i + 1) % polygon.length])));
   for (let x = 1; x < 12; x++) for (let y = 1; y < 12; y++) {
     const point: Point = [minX + (maxX - minX) * x / 12, minY + (maxY - minY) * y / 12];

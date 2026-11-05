@@ -39,6 +39,44 @@ export function joinContinuation(head, continuation) {
   return head + rest;
 }
 
+/** A closed HTTP body is not proof of a complete model response. */
+export function streamIsComplete(completed, finishReason, failure) {
+  return !failure && finishReason !== 'length' && (completed || finishReason === 'stop');
+}
+
+/** Recover complete review objects even if an earlier continuation damaged an outer JSON string. */
+export function recoverReviewResponses(text) {
+  const recovered = [];
+  for (const match of text.matchAll(/\{\s*"verdict"\s*:/g)) {
+    const start = match.index;
+    let depth = 1, inString = false, escaped = false;
+    for (let i = start + 1; i < text.length; i++) {
+      const char = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') { inString = true; continue; }
+      if (char === '{') depth++;
+      else if (char === '}') {
+        depth--;
+        if (depth === 0) {
+          try {
+            const review = JSON.parse(text.slice(start, i + 1));
+            if (['PASS', 'REVISE'].includes(review.verdict) && typeof review.code === 'string') {
+              recovered.push({ review, offset: start });
+            }
+          } catch { /* A partial or damaged earlier response is not a review candidate. */ }
+          break;
+        }
+      }
+    }
+  }
+  return recovered;
+}
+
 /** Same extraction as the client (src/lib/module.ts extractModule), syntax only. */
 export function moduleParses(text) {
   const clean = text.trim();

@@ -28,7 +28,8 @@ async function imageFile(file: File | Blob) {
 }
 async function sampleImage(path: string) { return imageFile(await (await fetch(path)).blob()); }
 async function api(path: string, payload: object) {
-  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(1500000) });
+  // Allow the server's three 20-minute stream attempts, plus retry overhead.
+  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(3900000) });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || 'Something went wrong. Please try again.');
   return result;

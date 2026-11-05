@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { readFile } from 'node:fs/promises';
-import { completeLines, joinContinuation, lastNonEmptyLine, moduleParses } from './stitch.js';
+import { completeLines, joinContinuation, lastNonEmptyLine, moduleParses, recoverReviewResponses, streamIsComplete } from './stitch.js';
 
 const app = new Hono();
 const API_KEY = process.env.NEBIUS_API_KEY;
@@ -75,7 +75,7 @@ async function completion(messages, kind, maxTokens = 18000) {
       console.warn(`[${MODEL}] ${kind}: no content returned (${failure?.message || finishReason || 'incomplete response'}); retrying (${attempt + 1}/3).`);
       continue;
     }
-    if (!failure && (completed || response.body.locked === false) && finishReason !== 'length') {
+    if (streamIsComplete(completed, finishReason, failure)) {
       const elapsed = (performance.now() - started) / 1000;
       const tokens = usage?.completion_tokens ?? 0;
       const tokensPerSecond = elapsed ? Math.round(tokens / elapsed * 10) / 10 : 0;
@@ -123,13 +123,11 @@ app.post('/api/review', async (c) => {
     ];
     if (typeof body.render === 'string' && body.render.startsWith('data:image/png')) content.push(imagePart(body.render));
     const result = await completion([{ role: 'system', content: reviewPrompt }, { role: 'user', content }], 'review', 40000);
-    let review;
-    try {
-      const clean = result.text.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/```$/, '');
-      review = JSON.parse(clean);
-    } catch { return c.json({ error: 'The model returned malformed review JSON. Please try again.' }, 502); }
-    if (!['PASS', 'REVISE'].includes(review.verdict)) return c.json({ error: 'Review verdict must be PASS or REVISE.' }, 502);
-    return c.json({ ...result, verdict: review.verdict, issues: Array.isArray(review.issues) ? review.issues.map(String) : [], improvements: Array.isArray(review.improvements) ? review.improvements.map(String) : [], code: review.code || '' });
+    const candidates = recoverReviewResponses(result.text), selected = candidates.at(-1);
+    if (!selected) return c.json({ ...result, error: 'The model returned malformed review JSON. Please try again.', malformedResponse: result.text, recoveredReviewCount: 0 }, 502);
+    const review = selected.review;
+    if (!['PASS', 'REVISE'].includes(review.verdict)) return c.json({ ...result, error: 'Review verdict must be PASS or REVISE.' }, 502);
+    return c.json({ ...result, recoveredReviewCount: candidates.length, recoveredReviewOffset: selected.offset, verdict: review.verdict, issues: Array.isArray(review.issues) ? review.issues.map(String) : [], improvements: Array.isArray(review.improvements) ? review.improvements.map(String) : [], code: review.code || '' });
   } catch (error) { console.error(error); return c.json({ error: error.message }, 500); }
 });
 

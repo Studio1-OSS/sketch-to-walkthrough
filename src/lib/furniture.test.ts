@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { buildFromModule } from './module';
 import { SAMPLE_SOURCE } from './sample';
 import { FURNITURE_TYPES, furnitureSchema, planSchema, type FurnitureItem, type PlanSpec } from './plan';
-import { applyFurnishing, autoFurnish, checkFurnitureGeometry, FURNITURE_CATALOGUE, furnitureClearOfOpenings, furnitureInsideRoom, itemDimensions, roomHasDoorPaths, openingClearPolygons, doorSwingPolygons, itemRect, polygonsIntersect } from './furniture';
-import { runChecks } from './checks';
+import { applyFurnishing, autoFurnish, checkFurnitureGeometry, diningChairPlacements, FURNITURE_CATALOGUE, furnitureClearOfOpenings, furnitureInsideRoom, itemDimensions, roomHasDoorPaths, openingClearPolygons, doorSwingPolygons, itemRect, polygonsIntersect } from './furniture';
+import { buildFurnitureItem } from './furniture-world';
+import { leftoverSpaceProblems, measureLeftoverSpace, runChecks } from './checks';
 import { collides } from './walkthrough';
 import { planToSVG } from './plan-svg';
+import { roomLabelLayout } from './label-layout';
 
 const base = () => structuredClone(buildFromModule(SAMPLE_SOURCE).plan);
 const item = (value: Partial<FurnitureItem> = {}): FurnitureItem => furnitureSchema.parse({ id: 'test_item', roomId: 'living', type: 'nightstand', position: [2600, 1900], rotation: 0, source: 'sketch', ...value });
@@ -45,6 +47,78 @@ describe('written-size checks', () => {
   });
 });
 
+describe('sketch adjacency checks', () => {
+  it('validates the adjacency schema', () => {
+    const plan = base();
+    plan.adjacency = [{ a: 'living', b: 'kitchen', side: 'N' }];
+    expect(planSchema.parse(plan).adjacency).toEqual(plan.adjacency);
+    expect(planSchema.safeParse({ ...plan, adjacency: [{ a: 'living', b: 'kitchen', side: 'NE' }] }).success).toBe(false);
+  });
+  it('accepts shared walls across partition thickness in the stated direction', () => {
+    const plan = base();
+    plan.adjacency = [{ a: 'living', b: 'kitchen', side: 'N' }, { a: 'living', b: 'hall', side: 'E' }, { a: 'kitchen', b: 'living', side: 'S' }, { a: 'hall', b: 'living', side: 'W' }];
+    const check = runChecks(plan).checks.find((c) => c.id === 'adjacency')!;
+    expect(check.ok, check.detail).toBe(true);
+    expect(check.detail).toContain('4 declared neighbouring rooms');
+  });
+  it('reports both room names and reversals of the stated side', () => {
+    const plan = base(); plan.adjacency = [{ a: 'living', b: 'kitchen', side: 'S' }];
+    const check = runChecks(plan).checks.find((c) => c.id === 'adjacency')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('Kitchen must be S of Living room');
+    expect(check.detail).toContain('wrong side');
+    expect(runChecks(plan).failures.join(' ')).toContain('Sketch adjacency');
+  });
+  it('rejects nearby rooms that do not share at least 600 mm', () => {
+    const plan = base(); plan.adjacency = [{ a: 'living', b: 'bedroom1', side: 'E' }];
+    expect(runChecks(plan).checks.find((c) => c.id === 'adjacency')!.detail).toContain('share at least 600 mm');
+    const shifted = base(); shifted.adjacency = [{ a: 'living', b: 'kitchen', side: 'N' }];
+    shifted.rooms.find((r) => r.id === 'kitchen')!.polygon = shifted.rooms.find((r) => r.id === 'kitchen')!.polygon.map(([x, y]) => [x + 5000, y]);
+    expect(runChecks(shifted).checks.find((c) => c.id === 'adjacency')!.ok).toBe(false);
+  });
+  it('reports missing and self-referencing rooms', () => {
+    const plan = base(); plan.adjacency = [{ a: 'living', b: 'missing', side: 'N' }, { a: 'hall', b: 'hall', side: 'E' }];
+    const detail = runChecks(plan).checks.find((c) => c.id === 'adjacency')!.detail;
+    expect(detail).toContain('missing room'); expect(detail).toContain('same room twice');
+  });
+});
+
+describe('leftover-space checks', () => {
+  it('accepts a house tiled by rooms and named circulation', () => {
+    const plan = base();
+    expect(runChecks(plan).checks.find((c) => c.id === 'coverage')!.ok).toBe(true);
+  });
+  it('reports the percentage, coordinates and nearest rooms for an unlabelled region', () => {
+    const plan = base(); plan.rooms = plan.rooms.filter((room) => room.id !== 'living');
+    const check = runChecks(plan).checks.find((c) => c.id === 'coverage')!;
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain('must be under 3%');
+    expect(check.detail).toContain('Largest unlabelled regions');
+    expect(check.detail).toMatch(/near \([\d.]+, [\d.]+\) m, closest to/);
+    expect(runChecks(plan).failures.join(' ')).toContain('No leftover space');
+  });
+  it('measures coverage against the actual exterior polygon', () => {
+    const plan = base(), exterior = plan.walls.filter((wall) => wall.exterior).map((wall) => wall.a);
+    const before = measureLeftoverSpace(plan, exterior);
+    plan.rooms = plan.rooms.filter((room) => room.id !== 'living');
+    const after = measureLeftoverSpace(plan, exterior);
+    expect(before.percentage).toBeLessThan(3);
+    expect(after.uncoveredArea).toBeGreaterThan(before.uncoveredArea);
+    expect(after.regions[0].nearestRooms.length).toBeGreaterThan(0);
+  });
+  it('uses a strict under-three-percent threshold', () => {
+    const result = { percentage: 3, uncoveredArea: 3_000_000, enclosedArea: 100_000_000, regions: [] };
+    expect(leftoverSpaceProblems(result)[0]).toContain('must be under 3%');
+    expect(leftoverSpaceProblems({ ...result, percentage: 2.99 })).toEqual([]);
+  });
+  it('does not count outdoor rooms outside the exterior as holes or cover', () => {
+    const plan = base(), exterior = plan.walls.filter((wall) => wall.exterior).map((wall) => wall.a);
+    const before = measureLeftoverSpace(plan, exterior);
+    plan.rooms.push({ id: 'outside_garden', name: 'Garden', polygon: [[-6000, -6000], [-1000, -6000], [-1000, -1000], [-6000, -1000]], floor: 'grass', kind: 'outdoor' });
+    expect(measureLeftoverSpace(plan, exterior)).toEqual(before);
+  });
+});
+
 describe('open and outdoor spaces', () => {
   it('supports open/outdoor kinds and the three new floor types', () => {
     const plan = base();
@@ -81,6 +155,8 @@ describe('furniture validation and deterministic checks', () => {
     expect(furnitureSchema.safeParse({ id: 'x', roomId: 'r', type: 'avalanche', position: [0, 0] }).success).toBe(false);
     expect(furnitureSchema.safeParse({ id: 'x', roomId: 'r', type: 'sofa', position: [0] }).success).toBe(false);
     expect(furnitureSchema.safeParse({ id: 'x', roomId: 'r', type: 'sofa', position: [0, 0], size: [-1, 0] }).success).toBe(false);
+    expect(furnitureSchema.safeParse({ id: 'x', roomId: 'r', type: 'sofa', position: [0, 0], seats: 10 }).success).toBe(false);
+    expect(furnitureSchema.safeParse({ id: 'x', roomId: 'r', type: 'dining_table', position: [0, 0], seats: 10.5 }).success).toBe(false);
   });
   it('checks a footprint fully inside its room, including rotation', () => {
     expect(furnitureInsideRoom(item(), base().rooms[0])).toBe(true);
@@ -182,6 +258,32 @@ describe('furniture collision and plan output', () => {
     expect(svg).toContain('g clip-path="url(#room-label-');
     expect(svg).toContain('Bedroom 02');
     expect(svg).not.toMatch(/<rect[^>]*fill="[^"]*"[^>]*fill="[^"]*"/);
+  });
+  it('places soft room-clipped label backgrounds above furniture symbols', () => {
+    const plan = base();
+    plan.rooms[0].name = 'Guest Bedroom';
+    plan.furniture = [item({ type: 'bed_double', position: [2750, 1970] })];
+    const svg = planToSVG(plan, { width: 1600 });
+    expect(svg.match(/class="room-label-background"/g)).toHaveLength(plan.rooms.length);
+    expect(svg.lastIndexOf('class="furniture-symbol"')).toBeLessThan(svg.indexOf('data-room-label="living"'));
+    expect(svg).toContain('fill-opacity="0.88"');
+    const layout = roomLabelLayout(plan.rooms[0], 0.03, 18);
+    expect(layout.nameLines).toEqual(['Guest Bedroom']);
+    expect(layout.fontSize).toBeLessThan(18);
+    expect(Math.max(...Array.from(svg.matchAll(/font-size="([\d.]+)"/g), (match) => Number(match[1])))).toBeLessThanOrEqual(20);
+  });
+  it('renders exactly the requested dining seats in plan and instanced 3D geometry', () => {
+    const plan = base();
+    plan.furniture = [item({ type: 'dining_table', position: [2800, 2000], size: [3600, 2400], seats: 10 })];
+    const svg = planToSVG(plan, { width: 1200 });
+    expect(svg.match(/class="dining-chair"/g)).toHaveLength(10);
+    expect(diningChairPlacements(2800, 2400, 10)).toHaveLength(10);
+    expect(diningChairPlacements(2800, 2400)).toHaveLength(6);
+    const root = buildFurnitureItem(plan.furniture[0]), chairMeshes: any[] = [];
+    root.traverse((object) => { if ((object as any).isInstancedMesh) chairMeshes.push(object); });
+    expect(root.userData.seats).toBe(10);
+    expect(chairMeshes).toHaveLength(2);
+    expect(chairMeshes.every((mesh) => mesh.count === 10)).toBe(true);
   });
   it('produces one fill attribute for every catalogue symbol, including a basin', () => {
     const plan = base(); plan.furniture = [item({ type: 'basin_vanity' })];

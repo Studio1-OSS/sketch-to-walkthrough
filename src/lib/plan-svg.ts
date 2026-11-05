@@ -28,11 +28,14 @@ export function planToSVG(plan: PlanSpec, options: { width?: number; dark?: bool
   }).join('');
   const furniture = plan.furniture.map((item) => furnitureToSVG(item, u, v, scale)).join('');
   const roomLabels = plan.rooms.map((room, index) => {
-    const label = roomLabelLayout(room, scale, Math.max(13, width / 60));
+    const label = roomLabelLayout(room, scale, Math.min(18, width / 72));
     const x = u(label.center[0]), y = v(label.center[1]), lineHeight = label.fontSize * 1.08;
     const blockHeight = (label.nameLines.length + 0.9) * lineHeight, start = y - blockHeight / 2 + label.fontSize;
+    const textWidth = Math.max(...label.nameLines.map((line) => line.length * label.fontSize * 0.56), label.area.length * label.fontSize * 0.78 * 0.56);
+    const backgroundWidth = textWidth + 14, backgroundHeight = blockHeight + 10;
+    const background = `<rect class="room-label-background" x="${x - backgroundWidth / 2}" y="${y - backgroundHeight / 2}" width="${backgroundWidth}" height="${backgroundHeight}" rx="5" fill="#f8f8f2" fill-opacity="0.88" stroke="#ffffff" stroke-opacity="0.6" stroke-width="1"/>`;
     const names = label.nameLines.map((line, i) => `<text x="${x}" y="${start + i * lineHeight}" text-anchor="middle" font-family="Arial,sans-serif" font-weight="600" font-size="${label.fontSize}" fill="${colors.text}">${escapeXml(line)}</text>`).join('');
-    return `<g clip-path="url(#room-label-${index})" data-room-label="${escapeXml(room.id)}">${names}<text x="${x}" y="${start + label.nameLines.length * lineHeight}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${label.fontSize * 0.78}" fill="${colors.dim}">${label.area}</text></g>`;
+    return `<g clip-path="url(#room-label-${index})" data-room-label="${escapeXml(room.id)}">${background}${names}<text x="${x}" y="${start + label.nameLines.length * lineHeight}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${label.fontSize * 0.78}" fill="${colors.dim}">${label.area}</text></g>`;
   }).join('');
   const walls = plan.walls.map((wall) => {
     const dx = wall.b[0] - wall.a[0], dy = wall.b[1] - wall.a[1], length = Math.hypot(dx, dy);

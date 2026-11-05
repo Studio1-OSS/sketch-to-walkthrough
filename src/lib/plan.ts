@@ -16,6 +16,13 @@ export const scheduleSchema = z.object({
   writtenDepth: z.number().positive().finite(),
   source: z.enum(['label', 'schedule']),
 });
+export const adjacencySchema = z.object({
+  a: z.string().min(1).max(80),
+  b: z.string().min(1).max(80),
+  side: z.enum(['N', 'S', 'E', 'W']),
+});
+export type Adjacency = z.infer<typeof adjacencySchema>;
+
 export const furnitureSchema = z.object({
   id: z.string().min(1).max(100),
   roomId: z.string().min(1).max(80),
@@ -23,7 +30,10 @@ export const furnitureSchema = z.object({
   position: pointSchema,
   rotation: z.number().finite().min(-360).max(360).default(0),
   size: z.tuple([z.number().positive().max(30000), z.number().positive().max(30000)]).optional(),
+  seats: z.number().int().min(2).max(20).optional(),
   source: z.enum(['sketch', 'auto']).default('sketch'),
+}).superRefine((item, context) => {
+  if (item.seats !== undefined && item.type !== 'dining_table') context.addIssue({ code: 'custom', message: 'seats is only valid for dining_table.' });
 });
 export type FurnitureItem = z.infer<typeof furnitureSchema>;
 
@@ -44,6 +54,7 @@ export const planSchema = z.object({
     kind: z.enum(['indoor', 'open', 'outdoor']).default('indoor'),
   })).min(1).max(60),
   schedule: z.array(scheduleSchema).max(60).optional(),
+  adjacency: z.array(adjacencySchema).max(400).optional(),
   openings: z.array(z.object({
     id: z.string().min(1).max(80),
     wallId: z.string().min(1).max(80),

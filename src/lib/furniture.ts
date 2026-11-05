@@ -43,6 +43,24 @@ export function itemDimensions(item: Pick<FurnitureItem, 'type' | 'size'>): [num
   return item.size ?? [definition.width, definition.depth];
 }
 
+export type DiningChairPlacement = { x: number; y: number; rotation: number };
+export function diningChairPlacements(tableWidth: number, footprintDepth: number, seats = 6): DiningChairPlacement[] {
+  const endCount = seats >= 4 ? 2 : 0, sideSeats = seats - endCount;
+  const sideClearance = endCount ? Math.min(560, tableWidth * 0.30) : 0;
+  const half = Math.max(0, tableWidth / 2 - sideClearance);
+  const placements: DiningChairPlacement[] = [];
+  for (const side of [-1, 1]) {
+    const count = side < 0 ? Math.ceil(sideSeats / 2) : Math.floor(sideSeats / 2);
+    for (let i = 0; i < count; i++) placements.push({
+      x: count === 1 ? 0 : -half + i * half * 2 / (count - 1),
+      y: side * (footprintDepth / 2 - Math.min(220, footprintDepth * 0.11)),
+      rotation: side > 0 ? 0 : 180,
+    });
+  }
+  if (endCount) for (const side of [-1, 1]) placements.push({ x: side * (tableWidth / 2 - Math.min(220, tableWidth * 0.12)), y: 0, rotation: side > 0 ? -90 : 90 });
+  return placements;
+}
+
 export function itemRect(item: FurnitureItem): Rect {
   const [width, depth] = itemDimensions(item);
   const angle = item.rotation * Math.PI / 180;

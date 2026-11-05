@@ -1,4 +1,4 @@
-import { itemDimensions } from './furniture';
+import { diningChairPlacements, itemDimensions } from './furniture';
 import type { FurnitureItem } from './plan';
 
 export function furnitureToSVG(item: FurnitureItem, u: (x: number) => number, v: (y: number) => number, scale: number) {
@@ -26,8 +26,12 @@ export function furnitureToSVG(item: FurnitureItem, u: (x: number) => number, v:
       break;
     case 'dining_table': {
       symbol = rect(-w * 0.32, -d * 0.25, w * 0.64, d * 0.5);
-      for (const x of [-w * 0.19, w * 0.19]) for (const y of [-d * 0.43, d * 0.34]) symbol += rect(x - w * 0.08, y, w * 0.16, d * 0.09);
-      for (const x of [-w * 0.47, w * 0.38]) symbol += rect(x, -d * 0.12, w * 0.09, d * 0.24);
+      const count = item.seats ?? 6, sideSeats = count >= 4 ? Math.ceil((count - 2) / 2) : Math.ceil(count / 2);
+      const chairWidth = Math.min(w * 0.16, w * 0.7 / Math.max(1, sideSeats));
+      for (const chair of diningChairPlacements(w * 0.64, d, item.seats)) {
+        const end = Math.abs(chair.rotation) === 90, cw = end ? w * 0.09 : chairWidth, cd = end ? d * 0.24 : d * 0.09;
+        symbol += `<g class="dining-chair" transform="translate(${chair.x} ${chair.y}) rotate(${-chair.rotation})">${rect(-cw / 2, -cd / 2, cw, cd)}</g>`;
+      }
       break;
     }
     case 'toilet':

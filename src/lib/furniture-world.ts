@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FURNITURE_CATALOGUE, itemRect } from './furniture';
+import { diningChairPlacements, FURNITURE_CATALOGUE, itemRect } from './furniture';
 import type { FurnitureItem, FurnitureType } from './plan';
 
 /** Shared low-poly geometry and a deliberately small calm material palette. */
@@ -50,13 +50,13 @@ function storage(parent: Group, width: number, depth: number, height: number, sh
   if (shelves) for (let y = 300; y < height; y += 400) box(parent, M.darkWood, [width - 100, 35, depth + 15], [0, y, 15]);
   else for (const x of [-1, 1]) box(parent, M.oakLight, [width / 2 - 20, height - 80, 25], [x * width / 4, height / 2, depth / 2 + 15]);
 }
-function chairInstances(parent: Group, tableWidth: number, tableDepth: number) {
-  const count = 6, seats = new THREE.InstancedMesh(boxGeometry, M.linen, count), backs = new THREE.InstancedMesh(boxGeometry, M.oak, count);
+function chairInstances(parent: Group, tableWidth: number, tableDepth: number, seatCount = 6) {
+  const seats = new THREE.InstancedMesh(boxGeometry, M.linen, seatCount), backs = new THREE.InstancedMesh(boxGeometry, M.oak, seatCount);
+  seats.name = `Dining seats (${seatCount})`; backs.name = `Dining chair backs (${seatCount})`;
   const dummy = new THREE.Object3D(); let index = 0;
-  const placements: [number, number, number][] = [];
-  for (const x of [-tableWidth * 0.26, tableWidth * 0.26]) for (const z of [-1, 1]) placements.push([x, z * (tableDepth / 2 - 220), z > 0 ? 0 : Math.PI]);
-  for (const x of [-1, 1]) placements.push([x * (tableWidth / 2 - 220), 0, x > 0 ? -Math.PI / 2 : Math.PI / 2]);
-  for (const [x, z, rotation] of placements) {
+  const placements = diningChairPlacements(tableWidth, tableDepth, seatCount);
+  for (const { x, y: z, rotation: degrees } of placements) {
+    const rotation = degrees * Math.PI / 180;
     dummy.position.set(x / 1000, 0.46, z / 1000); dummy.rotation.set(0, rotation, 0); dummy.scale.set(0.48, 0.12, 0.48); dummy.updateMatrix(); seats.setMatrixAt(index, dummy.matrix);
     const backX = x + Math.sin(rotation) * 210, backZ = z + Math.cos(rotation) * 210;
     dummy.position.set(backX / 1000, 0.77, backZ / 1000); dummy.scale.set(0.48, 0.58, 0.08); dummy.updateMatrix(); backs.setMatrixAt(index, dummy.matrix); index++;
@@ -100,7 +100,7 @@ function car(parent: Group, width: number, depth: number) {
   for (const x of [-1, 1]) box(parent, M.cushion, [width * 0.28, 120, 50], [x * width * 0.28, 720, depth / 2 + 20]);
 }
 
-export type FurnitureBuilder = (parent: Group, width: number, depth: number) => void;
+export type FurnitureBuilder = (parent: Group, width: number, depth: number, seats?: number) => void;
 export const FURNITURE_BUILDERS: Record<FurnitureType, FurnitureBuilder> = {
   bed_double: (p, w, d) => bed(p, w, d, false),
   bed_single: (p, w, d) => bed(p, w, d, true),
@@ -110,7 +110,7 @@ export const FURNITURE_BUILDERS: Record<FurnitureType, FurnitureBuilder> = {
   armchair: (p, w, d) => sofa(p, w, d, true),
   coffee_table: (p, w, d) => table(p, w, d, 390),
   tv_unit: (p, w, d) => { storage(p, w, d, 520); box(p, M.dark, [w * 0.75, 850, 80], [0, 990, -d * 0.22]); box(p, M.screen, [w * 0.70, 760, 20], [0, 995, -d * 0.22 + 50]); },
-  dining_table: (p, w, d) => { table(p, w * 0.78, d * 0.47); chairInstances(p, w * 0.78, d); },
+  dining_table: (p, w, d, seats) => { table(p, w * 0.78, d * 0.47); chairInstances(p, w * 0.78, d, seats); },
   kitchen_run: (p, w, d) => { storage(p, w, d, 850); box(p, M.white, [w, 70, d + 30], [0, 900, 0]); box(p, M.dark, [w * 0.25, 30, d * 0.55], [-w * 0.23, 945, 0]); for (const x of [-1, 1]) cylinder(p, M.metal, [100, 25, 100], [x * 100 + w * 0.25, 955, 0]); },
   kitchen_island: (p, w, d) => { storage(p, w, d, 850); box(p, M.white, [w + 60, 80, d + 60], [0, 900, 0]); },
   fridge: (p, w, d) => { box(p, M.metal, [w, 1900, d], [0, 950, 0]); box(p, M.white, [30, 900, 35], [-w * 0.3, 1200, d / 2 + 20]); },
@@ -131,8 +131,8 @@ export const FURNITURE_BUILDERS: Record<FurnitureType, FurnitureBuilder> = {
 
 export function buildFurnitureItem(item: FurnitureItem) {
   const definition = FURNITURE_CATALOGUE[item.type], [width, depth] = item.size ?? [definition.width, definition.depth];
-  const root = new THREE.Group(); root.name = `${item.id} (${item.type})`; root.userData = { furniture: true, furnitureId: item.id, furnitureType: item.type, source: item.source, blocking: definition.collision, footprint: itemRect(item).corners };
-  FURNITURE_BUILDERS[item.type](root, width, depth);
+  const root = new THREE.Group(); root.name = `${item.id} (${item.type})`; root.userData = { furniture: true, furnitureId: item.id, furnitureType: item.type, source: item.source, seats: item.seats, blocking: definition.collision, footprint: itemRect(item).corners };
+  FURNITURE_BUILDERS[item.type](root, width, depth, item.seats);
   root.position.set(item.position[0] / 1000, 0, -item.position[1] / 1000); root.rotation.y = item.rotation * Math.PI / 180;
   return root;
 }

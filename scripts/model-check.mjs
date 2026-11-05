@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:5180';
+const LOOP_TIMEOUT_MS = Number(process.env.MODEL_LOOP_TIMEOUT_MS || 7200000);
 const SAMPLE_IMAGE = process.env.SAMPLE_IMAGE ? path.resolve(process.env.SAMPLE_IMAGE) : null;
 const PREFIX = process.env.EVIDENCE_PREFIX || (SAMPLE_IMAGE ? 'courtyard' : 'live');
 const EVIDENCE = process.env.MODEL_EVIDENCE || (SAMPLE_IMAGE ? 'courtyard-verification.json' : 'model-verification.json');
@@ -28,6 +29,7 @@ page.on('response', async (response) => {
     const body = await response.json(); const request = response.request().postDataJSON();
     body.completion = body.usage?.completion ?? body.completion;
     calls.push({ path: new URL(response.url()).pathname, status: response.status(), ...body });
+    fs.writeFileSync(path.join(OUT, `${PREFIX}-call-${String(calls.length).padStart(2, '0')}-${new URL(response.url()).pathname.split('/').pop()}.json`), JSON.stringify(body, null, 2));
     if (request.sketch) {
       const base = (image) => Buffer.from(image.slice(image.indexOf(',') + 1), 'base64');
       fs.writeFileSync(path.join(OUT, `${PREFIX}-original-sketch.png`), base(request.sketch));
@@ -55,7 +57,7 @@ try {
   else await page.getByRole('button', { name: 'Generate walkthrough from The two-bedroom', exact: true }).click();
   await page.waitForSelector('.generation-overlay', { state: 'visible', timeout: 20000 });
   console.log('Real generation request started; waiting for the first valid version.');
-  await page.waitForFunction(() => { const studio = document.querySelector('.studio'); return Number(studio?.dataset.firstWalkable) > 0 || Number(studio?.dataset.finalElapsed) > 0; }, undefined, { timeout: 1200000 });
+  await page.waitForFunction(() => { const studio = document.querySelector('.studio'); return Number(studio?.dataset.firstWalkable) > 0 || Number(studio?.dataset.finalElapsed) > 0; }, undefined, { timeout: LOOP_TIMEOUT_MS });
   const firstWalkable = await page.locator('.studio').getAttribute('data-first-walkable');
   if (firstWalkable) {
     firstWalkableWallSeconds = (Date.now() - started) / 1000;
@@ -63,7 +65,7 @@ try {
     console.log(`FIRST WALKABLE VERSION in ${firstWalkableWallSeconds.toFixed(1)}s wall / ${firstWalkableAppSeconds.toFixed(1)}s app.`);
     await page.screenshot({ path: path.join(OUT, `${PREFIX}-first-walkable.png`) });
   }
-  await page.waitForFunction(() => Number(document.querySelector('.studio')?.dataset.finalElapsed) > 0, undefined, { timeout: 1200000 });
+  await page.waitForFunction(() => Number(document.querySelector('.studio')?.dataset.finalElapsed) > 0, undefined, { timeout: LOOP_TIMEOUT_MS });
   await page.waitForSelector('.generation-overlay', { state: 'hidden', timeout: 1000 });
   await page.waitForTimeout(1800);
   const wallSeconds = (Date.now() - started) / 1000;
@@ -78,13 +80,14 @@ try {
     await page.getByRole('tab', { name: /Checks/ }).click();
     const checks = await page.locator('.checks-panel').innerText();
     const verdict = await page.locator('.version-button').nth(i).innerText();
-    versions.push({ version: v, button: verdict, engineeringState: await page.locator('.canvas-wrap .viewer-host').count() ? await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks') : 'no-valid-plan', checks });
+    const invalidFallback = await page.locator('.invalid-version-note').isVisible().catch(() => false);
+    versions.push({ version: v, button: verdict, engineeringState: invalidFallback ? 'invalid' : await page.locator('.canvas-wrap .viewer-host').count() ? await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks') : 'no-valid-plan', checks });
     await page.screenshot({ path: path.join(OUT, `${PREFIX}-v${v}-checks.png`) });
   }
   if (await page.locator('.version-button:not(.invalid)').count() === 0) throw new Error('No schema-valid plan was returned. See version errors and real API calls.');
   await page.locator('.version-button:not(.invalid)').last().click();
   await page.getByRole('tab', { name: 'Plan', exact: true }).click(); await page.waitForTimeout(400);
-  await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-after-plan.png' : `${PREFIX}-after-plan.png`) });
+  await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-pass4-plan.png' : `${PREFIX}-after-plan.png`) });
   await page.locator('.export-button').click();
   const planDownloadPromise = page.waitForEvent('download');
   await page.locator('.export-menu>button').filter({ hasText: 'Plan data' }).click();
@@ -99,20 +102,30 @@ try {
     const pass = [[generatedWidth, generatedDepth], [generatedDepth, generatedWidth]].some((actual) => actual.every((value, axis) => Math.abs(value - [entry.writtenWidth, entry.writtenDepth][axis]) <= Math.max(150, [entry.writtenWidth, entry.writtenDepth][axis] * 0.1) + 0.001));
     return { roomId: entry.roomId, name: room.name, written: [entry.writtenWidth, entry.writtenDepth], generated: [generatedWidth, generatedDepth], source: entry.source, pass };
   });
+  const geometricEvidence = await page.evaluate(async (plan) => {
+    const { adjacencyProblems, runChecks } = await import('/src/lib/checks.ts');
+    const names = new Map(plan.rooms.map((room) => [room.id, room.name]));
+    const adjacency = (plan.adjacency || []).map((entry) => {
+      const problems = adjacencyProblems({ ...plan, adjacency: [entry] });
+      return { ...entry, sketchSays: `${names.get(entry.b) || entry.b} is ${entry.side} of ${names.get(entry.a) || entry.a}`, resultHas: problems.length === 0, pass: problems.length === 0, problems };
+    });
+    const checks = runChecks(plan), coverage = checks.checks.find((check) => check.id === 'coverage');
+    return { adjacency, coverage, checks };
+  }, finalPlan);
   await page.getByRole('tab', { name: 'Dollhouse', exact: true }).click(); await page.waitForTimeout(500);
-  await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-dollhouse.png' : `${PREFIX}-final-dollhouse.png`) });
+  await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-pass4-dollhouse.png' : `${PREFIX}-final-dollhouse.png`) });
   await page.getByRole('tab', { name: 'Walkthrough', exact: true }).click(); await page.waitForTimeout(400);
   const entry = page.getByRole('button', { name: 'Enter your walkthrough' });
   if (await entry.isVisible()) await entry.click();
-  await page.waitForTimeout(600); await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-walkthrough.png' : `${PREFIX}-final-walkthrough.png`) });
-  await page.waitForTimeout(600); await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-walkthrough.png' : `${PREFIX}-final-walkthrough.png`) });
+  await page.waitForTimeout(600); await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-pass4-walkthrough.png' : `${PREFIX}-final-walkthrough.png`) });
+  await page.waitForTimeout(600); await page.screenshot({ path: path.join(OUT, SAMPLE_IMAGE ? 'courtyard-pass4-walkthrough.png' : `${PREFIX}-final-walkthrough.png`) });
   await page.keyboard.press('Escape');
   await page.evaluate(() => { if (document.pointerLockElement) document.exitPointerLock(); });
   await page.locator('.debug-button').click(); await page.waitForTimeout(200); await page.screenshot({ path: path.join(OUT, `${PREFIX}-debug.png`) });
   const combinedFirstWalkableWallSeconds = firstWalkableWallSeconds === null ? null : firstWalkableWallSeconds + reusedModelSeconds;
   const combinedFirstWalkableAppSeconds = firstWalkableAppSeconds === null ? null : firstWalkableAppSeconds + reusedModelSeconds;
   const combinedWallSeconds = wallSeconds + reusedModelSeconds;
-  const results = { date: new Date().toISOString(), sampleImage: SAMPLE_IMAGE, model: calls[0]?.model, health, realModelCalls: calls.filter((call) => !call.reused).length + (reusedGeneration ? 1 : 0) + replayedReviewCount, firstWalkableWallSeconds, firstWalkableAppSeconds, wallSeconds, reusedGenerationFrom: REUSE_GENERATION_FROM, reusedGenerationSeconds, combinedFirstWalkableWallSeconds, combinedFirstWalkableAppSeconds, combinedWallSeconds, versions, roomSizes, furnitureCount: finalPlan.furniture.length, sketchFurnitureCount: finalPlan.furniture.filter((f) => f.source === 'sketch').length, autoFurnitureCount: finalPlan.furniture.filter((f) => f.source === 'auto').length, finalChecks: versions.at(-1), errors, calls };
+  const results = { date: new Date().toISOString(), sampleImage: SAMPLE_IMAGE, model: calls[0]?.model, health, realModelCalls: calls.filter((call) => !call.reused).length + (reusedGeneration ? 1 : 0) + replayedReviewCount, firstWalkableWallSeconds, firstWalkableAppSeconds, wallSeconds, reusedGenerationFrom: REUSE_GENERATION_FROM, reusedGenerationSeconds, combinedFirstWalkableWallSeconds, combinedFirstWalkableAppSeconds, combinedWallSeconds, versions, roomSizes, adjacency: geometricEvidence.adjacency, leftoverSpace: geometricEvidence.coverage, deterministicChecks: geometricEvidence.checks, monetaryCost: 'Not reported by the model endpoint; no estimate made.', furnitureCount: finalPlan.furniture.length, sketchFurnitureCount: finalPlan.furniture.filter((f) => f.source === 'sketch').length, autoFurnitureCount: finalPlan.furniture.filter((f) => f.source === 'auto').length, finalChecks: versions.at(-1), errors, calls };
   fs.writeFileSync(path.join(OUT, EVIDENCE), JSON.stringify(results, null, 2));
   console.log(`Saved real run: screenshots/${EVIDENCE}; ${versions.length} versions; ${errors.length} captured errors.`);
   if (!calls.length || calls.some((call) => call.error) || errors.length || !versions.length) process.exitCode = 1;

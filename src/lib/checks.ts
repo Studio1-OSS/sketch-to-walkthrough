@@ -43,6 +43,141 @@ function polygonSimple(polygon: [number, number][]) {
   }
   return true;
 }
+function sharedBoundaryOnSide(a: PlanSpec['rooms'][number], b: PlanSpec['rooms'][number], side: 'N' | 'S' | 'E' | 'W', tolerance: number) {
+  const axis = side === 'N' || side === 'S' ? 1 : 0;
+  const tangent = axis === 1 ? 0 : 1;
+  const direction = side === 'N' || side === 'E' ? 1 : -1;
+  const aCenter = roomCenter(a.polygon), bCenter = roomCenter(b.polygon);
+  const intervals = new Map<number, [number, number][]>();
+  for (let i = 0; i < a.polygon.length; i++) {
+    const a0 = a.polygon[i], a1 = a.polygon[(i + 1) % a.polygon.length];
+    if (Math.abs(a0[axis] - a1[axis]) > EPS || (a0[axis] - aCenter[axis]) * direction < -EPS) continue;
+    for (let j = 0; j < b.polygon.length; j++) {
+      const b0 = b.polygon[j], b1 = b.polygon[(j + 1) % b.polygon.length];
+      if (Math.abs(b0[axis] - b1[axis]) > EPS || (bCenter[axis] - b0[axis]) * direction < -EPS) continue;
+      if (Math.abs(a0[axis] - b0[axis]) > tolerance) continue;
+      const low = Math.max(Math.min(a0[tangent], a1[tangent]), Math.min(b0[tangent], b1[tangent]));
+      const high = Math.min(Math.max(a0[tangent], a1[tangent]), Math.max(b0[tangent], b1[tangent]));
+      if (high <= low) continue;
+      // Collinear polygon vertices may split a single wall into several contiguous pieces.
+      const key = Math.round(a0[axis] / EPS), pieces = intervals.get(key) ?? [];
+      pieces.push([low, high]); intervals.set(key, pieces);
+    }
+  }
+  let longest = 0;
+  for (const pieces of intervals.values()) {
+    pieces.sort((a, b) => a[0] - b[0]);
+    let [low, high] = pieces[0];
+    for (const [nextLow, nextHigh] of pieces.slice(1)) {
+      if (nextLow > high + EPS) { longest = Math.max(longest, high - low); low = nextLow; high = nextHigh; }
+      else high = Math.max(high, nextHigh);
+    }
+    longest = Math.max(longest, high - low);
+  }
+  return { length: longest, correctSide: (bCenter[axis] - aCenter[axis]) * direction > EPS };
+}
+
+export function adjacencyProblems(plan: PlanSpec): string[] {
+  const problems: string[] = [], rooms = new Map(plan.rooms.map((room) => [room.id, room]));
+  const tolerance = Math.max(120, ...plan.walls.map((wall) => wall.thickness));
+  const seen = new Set<string>();
+  for (const relation of plan.adjacency ?? []) {
+    const a = rooms.get(relation.a), b = rooms.get(relation.b);
+    if (!a || !b) { problems.push(`Adjacency ${relation.a} → ${relation.b} references a missing room.`); continue; }
+    if (a.id === b.id) { problems.push(`Adjacency for ${a.name} cannot reference the same room twice.`); continue; }
+    const key = `${a.id}|${b.id}|${relation.side}`;
+    if (seen.has(key)) { problems.push(`Duplicate adjacency: ${b.name} is ${relation.side} of ${a.name}.`); continue; }
+    seen.add(key);
+    const shared = sharedBoundaryOnSide(a, b, relation.side, tolerance);
+    if (shared.length < 600 - EPS || !shared.correctSide) {
+      const sideIssue = shared.correctSide ? '' : ' It is on the wrong side.';
+      problems.push(`${b.name} must be ${relation.side} of ${a.name} and share at least 600 mm of wall; found ${Math.round(shared.length)} mm.${sideIssue}`);
+    }
+  }
+  return problems;
+}
+
+export type LeftoverRegion = { area: number; center: [number, number]; nearestRooms: string[] };
+export type LeftoverSpace = { percentage: number; uncoveredArea: number; enclosedArea: number; regions: LeftoverRegion[] };
+
+function clippedCellArea(minX: number, minY: number, step: number, exterior: [number, number][]) {
+  let polygon: [number, number][] = [[minX, minY], [minX + step, minY], [minX + step, minY + step], [minX, minY + step]];
+  for (let i = 0; i < exterior.length && polygon.length; i++) {
+    const a = exterior[i], b = exterior[(i + 1) % exterior.length];
+    const signedDistance = (point: [number, number]) => (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]);
+    const clipped: [number, number][] = [];
+    for (let j = 0; j < polygon.length; j++) {
+      const p = polygon[j], q = polygon[(j + 1) % polygon.length];
+      const pDistance = signedDistance(p), qDistance = signedDistance(q);
+      const pInside = pDistance >= -EPS, qInside = qDistance >= -EPS;
+      if (pInside !== qInside) {
+        const t = pDistance / (pDistance - qDistance);
+        clipped.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+      }
+      if (qInside) clipped.push(q);
+    }
+    polygon = clipped;
+  }
+  return polygon.length >= 3 ? Math.min(step * step, polygonArea(polygon)) : 0;
+}
+
+/** Sample occupancy on a fixed 200 mm grid and clip each cell's area at the exterior. */
+export function measureLeftoverSpace(plan: PlanSpec, exteriorPolygon: [number, number][]): LeftoverSpace {
+  const step = 200;
+  const enclosedArea = polygonArea(exteriorPolygon);
+  const xs = exteriorPolygon.map((p) => p[0]), ys = exteriorPolygon.map((p) => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cols = Math.max(1, Math.ceil((maxX - minX) / step)), rows = Math.max(1, Math.ceil((maxY - minY) / step));
+  const roomAllowance = Math.max(120, ...plan.walls.map((wall) => wall.thickness)) / 2 + EPS;
+  // Exterior sampling already excludes outside rooms; an outdoor-named room inside the loop still occupies space.
+  const roomPolygons = plan.rooms.map((room) => room.polygon);
+  const exterior = [...exteriorPolygon];
+  if (exterior.length > 1 && distance(exterior[0], exterior[exterior.length - 1]) < EPS) exterior.pop();
+  const signedArea = exterior.reduce((sum, p, i) => { const q = exterior[(i + 1) % exterior.length]; return sum + p[0] * q[1] - q[0] * p[1]; }, 0);
+  if (signedArea < 0) exterior.reverse();
+  const uncovered: number[] = [], cells = new Map<number, { point: [number, number]; area: number }>();
+  for (let row = 0; row < rows; row++) for (let col = 0; col < cols; col++) {
+    const x = minX + col * step, y = minY + row * step, area = clippedCellArea(x, y, step, exterior);
+    if (area <= EPS) continue;
+    const center: [number, number] = [x + step / 2, y + step / 2];
+    const candidates: [number, number][] = [center, [x + step / 4, y + step / 4], [x + step * 0.75, y + step / 4], [x + step / 4, y + step * 0.75], [x + step * 0.75, y + step * 0.75]];
+    const point = candidates.find((candidate) => pointInPolygon(candidate, exteriorPolygon)) ?? center;
+    const covered = roomPolygons.some((polygon) => pointInPolygon(point, polygon) || polygon.some((a, i) => pointSegmentDistance(point, a, polygon[(i + 1) % polygon.length]) <= roomAllowance)) ||
+      plan.walls.some((wall) => pointSegmentDistance(point, wall.a, wall.b) <= wall.thickness / 2 + EPS);
+    if (!covered) { const index = row * cols + col; uncovered.push(index); cells.set(index, { point, area }); }
+  }
+  const remaining = new Set(uncovered), regions: LeftoverRegion[] = [];
+  while (remaining.size) {
+    const first = remaining.values().next().value!;
+    remaining.delete(first);
+    const queue = [first], component: number[] = [];
+    while (queue.length) {
+      const index = queue.shift()!; component.push(index);
+      const col = index % cols;
+      const neighbours = [index - cols, index + cols, ...(col > 0 ? [index - 1] : []), ...(col < cols - 1 ? [index + 1] : [])];
+      for (const next of neighbours) if (remaining.has(next)) { remaining.delete(next); queue.push(next); }
+    }
+    const area = component.reduce((sum, index) => sum + cells.get(index)!.area, 0);
+    const center = component.reduce((sum, index) => {
+      const cell = cells.get(index)!, weight = cell.area / area;
+      return [sum[0] + cell.point[0] * weight, sum[1] + cell.point[1] * weight] as [number, number];
+    }, [0, 0] as [number, number]);
+    const nearestRooms = plan.rooms.map((room) => ({ name: room.name, distance: distance(center, roomCenter(room.polygon)) })).sort((a, b) => a.distance - b.distance).slice(0, 2).map((room) => room.name);
+    regions.push({ area, center, nearestRooms });
+  }
+  regions.sort((a, b) => b.area - a.area);
+  const uncoveredArea = Math.min(enclosedArea, regions.reduce((sum, region) => sum + region.area, 0));
+  return { percentage: enclosedArea ? uncoveredArea / enclosedArea * 100 : 0, uncoveredArea, enclosedArea, regions };
+}
+
+export function leftoverSpaceProblems(result: LeftoverSpace): string[] {
+  if (result.percentage >= 3) {
+    const largest = result.regions.slice(0, 3).map((region) => `${(region.area / 1e6).toFixed(1)} m² near (${(region.center[0] / 1000).toFixed(1)}, ${(region.center[1] / 1000).toFixed(1)}) m, closest to ${region.nearestRooms.join(' and ') || 'no named room'}`).join('; ');
+    return [`Uncovered interior area is ${result.percentage.toFixed(1)}% (${(result.uncoveredArea / 1e6).toFixed(1)} m²); it must be under 3%. Largest unlabelled regions: ${largest}. Fill these with rooms or named circulation spaces.`];
+  }
+  return [];
+}
+
 function wallLoop(walls: PlanSpec['walls']) {
   const vertices = new Map<string, { point: [number, number]; count: number }>();
   const pointKey = (p: [number, number]) => `${Math.round(p[0] / EPS)},${Math.round(p[1] / EPS)}`;
@@ -81,7 +216,8 @@ export function runChecks(plan: PlanSpec): CheckResults {
     }
   }
   const exterior = plan.walls.filter((w) => w.exterior);
-  if (!wallLoop(exterior)) badWalls.push('Exterior wall endpoints must form one connected, closed loop (one wall in, one wall out at every corner).');
+  const closedExterior = wallLoop(exterior);
+  if (!closedExterior) badWalls.push('Exterior wall endpoints must form one connected, closed loop (one wall in, one wall out at every corner).');
   add('walls', 'Structure & wall loop', badWalls, 'Exterior walls close cleanly. No crossing or overlapping walls.');
 
   const badRooms: string[] = [];
@@ -134,6 +270,13 @@ export function runChecks(plan: PlanSpec): CheckResults {
     if (!matches) badSizes.push(`Room ${room.name} is ${Math.round(actual[0])} × ${Math.round(actual[1])} mm; written size is ${entry.writtenWidth} × ${entry.writtenDepth} mm (±10% or ±150 mm, whichever is larger, either orientation).`);
   }
   add('sizes', 'Written room sizes', badSizes, plan.schedule?.length ? `${plan.schedule.length} written room sizes match their polygons within tolerance.` : 'No written room-size schedule was supplied.');
+
+  const badAdjacency = adjacencyProblems(plan);
+  add('adjacency', 'Sketch adjacency', badAdjacency, plan.adjacency?.length ? `${plan.adjacency.length} declared neighbouring rooms share at least 600 mm on the stated side.` : 'No sketch adjacency was supplied.');
+
+  const leftover = closedExterior && orderedExterior.length >= 4 ? measureLeftoverSpace(plan, orderedExterior) : null;
+  const badLeftover = leftover ? leftoverSpaceProblems(leftover) : ['Leftover space cannot be measured until the exterior forms one closed loop.'];
+  add('coverage', 'No leftover space', badLeftover, leftover ? `${leftover.percentage.toFixed(1)}% of the enclosed area is uncovered after wall-thickness allowance; the limit is under 3%.` : 'Coverage measured.');
 
   const badOpenings: string[] = [], wallById = new Map(plan.walls.map((w) => [w.id, w]));
   for (const opening of plan.openings) {
