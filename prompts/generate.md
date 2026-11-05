@@ -25,7 +25,7 @@ MODULE CONTRACT
 - All coordinates, furniture, openings, and dimensions are mm. Origin bottom-left; Y increases upward on paper. wallHeight becomes vertical Y in 3D.
 - Every dimension in PARAMS has a numeric literal value/min/max, min < max, and value inside the inclusive bounds. Give realistic narrow bounds. Room entries reference their room ID. Derive all geometry from P; do not hardcode a dimension represented by P. Do not create redundant x/y coordinate sliders.
 - buildPlan receives plain numeric P and returns a fresh PlanSpec quickly. Only pure JavaScript, Math and Number. No DOM, network, imports, external calls, ambient globals, mutation of P, new Function, or async.
-- SOURCE WHITELIST: simple identifier parameters only; no defaults/rest/destructuring. No assignment or update expressions anywhere (including property assignment, += and ++). Use const declarations, complete object literals and array .push(...). Pure private named function helpers are allowed.
+- SOURCE WHITELIST: simple identifier parameters only; no defaults/rest/destructuring. Prefer const declarations, complete object literals and array .push(...). Assignment (=, +=, ++) is allowed only on variables you declared yourself and their properties; never assign to P, PARAMS, ASSUMPTIONS, Math, Number or anything undeclared. Pure private named function helpers are allowed.
 - At all slider bounds preserve the closed exterior, room sizes, openings and connections. Couple dependent walls geometrically; do not let resized rooms overlap.
 
 PLANSPEC

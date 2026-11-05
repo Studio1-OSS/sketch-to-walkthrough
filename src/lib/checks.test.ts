@@ -38,6 +38,25 @@ describe('sandbox source validation', () => {
   ])('rejects unsafe source: %s', (source) => {
     expect(() => validateGeneratorSource(source)).toThrow();
   });
+  const wrap = (body: string) => `export const PARAMS = {}; export const ASSUMPTIONS = []; export function buildPlan(P) { ${body} }`;
+  it.each([
+    'let x = 1; x = 2; x += 3; x++; return x;',
+    'const walls = []; const o = { w: 1 }; o.w = P.a * 2; o.w += 10; walls.push(o); return walls;',
+    'const rooms = [{ a: [0, 0] }]; rooms[0].a[1] = 5; return rooms;',
+  ])('allows assignment to its own variables: %s', (body) => {
+    expect(validateGeneratorSource(wrap(body))).toBe(true);
+  });
+  it.each([
+    'Math.PI = 3; return 1;',
+    'Number.MAX_VALUE = 1; return 1;',
+    'PARAMS.a = 1; return 1;',
+    'ASSUMPTIONS.length = 0; return 1;',
+    'self.onmessage = 1; return 1;',
+    'leaked = 1; return 1;',
+    'const o = {}; o.__proto__ = {}; return o;',
+  ])('still rejects assignment to shared or undeclared targets: %s', (body) => {
+    expect(() => validateGeneratorSource(wrap(body))).toThrow(SourceError);
+  });
   it('rejects missing exports', () => {
     expect(() => buildFromModule('export const PARAMS = {}')).toThrow(SourceError);
   });

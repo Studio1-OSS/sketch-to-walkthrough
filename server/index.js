@@ -10,6 +10,10 @@ const BASE_URL = (process.env.NEBIUS_BASE_URL || 'https://api.tokenfactory.nebiu
 const MODEL = process.env.MODEL || 'moonshotai/Kimi-K3.1-Pro';
 const GENERATE_REASONING_EFFORT = process.env.GENERATE_REASONING_EFFORT || 'low';
 const REVIEW_REASONING_EFFORT = process.env.REVIEW_REASONING_EFFORT || 'medium';
+// Budgets cover reasoning plus the full module. A large plan's review rewrites ~40k characters after
+// ~20k reasoning tokens; running out of budget is not a network drop, and resuming it re-reasons from scratch.
+const GENERATE_MAX_TOKENS = Number(process.env.GENERATE_MAX_TOKENS || 64000);
+const REVIEW_MAX_TOKENS = Number(process.env.REVIEW_MAX_TOKENS || 96000);
 const generatePrompt = await readFile(new URL('../prompts/generate.md', import.meta.url), 'utf8');
 const reviewPrompt = await readFile(new URL('../prompts/review.md', import.meta.url), 'utf8');
 const imagePart = (data) => ({ type: 'image_url', image_url: { url: data } });
@@ -83,7 +87,8 @@ async function completion(messages, kind, maxTokens = 18000) {
       console.log(`[${MODEL}] ${kind}: ${tokens} completion tokens (${reasoning ?? 'unknown'} reasoning), ${tokensPerSecond} tokens/sec, ${elapsed.toFixed(1)}s`);
       return { text: prefix, stitched, usage: { prompt: usage?.prompt_tokens ?? 0, completion: tokens, total: usage?.total_tokens ?? 0, reasoning }, elapsed: Math.round(elapsed * 100) / 100, tokensPerSecond, model: MODEL, reasoningEffort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT };
     }
-    console.warn(`[${MODEL}] ${kind}: interrupted response, continuing ${prefix.length} characters (${attempt + 1}/3).`);
+    const why = failure ? `stream error: ${failure.message}` : finishReason === 'length' ? `hit max_tokens ${maxTokens}` : 'stream ended without [DONE]';
+    console.warn(`[${MODEL}] ${kind}: interrupted response (${why}), continuing ${prefix.length} characters (${attempt + 1}/3).`);
   }
   throw new Error('Model stream was interrupted three times. Please try again.');
 }
@@ -102,11 +107,11 @@ app.post('/api/generate', async (c) => {
   try {
     const { image } = await c.req.json(); checkRequest(image);
     const messages = [{ role: 'system', content: generatePrompt }, { role: 'user', content: [imagePart(image), { type: 'text', text: 'Read this floor plan and return the complete generator module.' }] }];
-    let result = await completion(messages, 'generate', 32000);
+    let result = await completion(messages, 'generate', GENERATE_MAX_TOKENS);
     // A resumed stream that still does not parse would waste a whole review round; regenerate once instead.
     if (result.stitched && !moduleParses(result.text)) {
       console.warn(`[${MODEL}] generate: resumed module has a syntax error; regenerating once.`);
-      result = await completion(messages, 'generate', 32000);
+      result = await completion(messages, 'generate', GENERATE_MAX_TOKENS);
     }
     return c.json({ ...result, code: result.text });
   } catch (error) { console.error(error); return c.json({ error: error.message }, 500); }
@@ -122,7 +127,7 @@ app.post('/api/review', async (c) => {
       { type: 'text', text: `DETERMINISTIC RESULTS:\n${checks}\n\nCURRENT GENERATOR:\n${body.code}\n\n${body.buildError ? `BUILD OR VALIDATION ERROR: ${String(body.buildError).slice(0, 1000)}` : 'The generator executed and validated. The following image is the top-down orthographic capture from the app canvas.'}` },
     ];
     if (typeof body.render === 'string' && body.render.startsWith('data:image/png')) content.push(imagePart(body.render));
-    const result = await completion([{ role: 'system', content: reviewPrompt }, { role: 'user', content }], 'review', 40000);
+    const result = await completion([{ role: 'system', content: reviewPrompt }, { role: 'user', content }], 'review', REVIEW_MAX_TOKENS);
     const candidates = recoverReviewResponses(result.text), selected = candidates.at(-1);
     if (!selected) return c.json({ ...result, error: 'The model returned malformed review JSON. Please try again.', malformedResponse: result.text, recoveredReviewCount: 0 }, 502);
     const review = selected.review;

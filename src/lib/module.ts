@@ -44,8 +44,19 @@ export function validateGeneratorSource(source: string) {
     if (node.type === 'MemberExpression' && ((node.property.type === 'Identifier' && !node.computed && ['constructor', 'prototype', '__proto__'].includes(node.property.name)) || (node.property.type === 'Literal' && typeof node.property.value === 'string' && ['constructor', 'prototype', '__proto__'].includes(node.property.value)))) {
       throw new SourceError('Prototype and dynamic-constructor access are not allowed in a generator.');
     }
-    if (['ImportExpression', 'AwaitExpression', 'ThisExpression', 'NewExpression', 'AssignmentExpression', 'UpdateExpression', 'DebuggerStatement', 'TryStatement', 'ClassDeclaration'].includes(node.type)) {
+    if (['ImportExpression', 'AwaitExpression', 'ThisExpression', 'NewExpression', 'DebuggerStatement', 'TryStatement', 'ClassDeclaration'].includes(node.type)) {
       throw new SourceError(`${node.type} is not allowed in a generator.`);
+    }
+  });
+  // Assignments are fine on the generator's own variables (and their properties); never on shared bindings.
+  const shared = new Set(['PARAMS', 'ASSUMPTIONS', 'buildPlan', 'Math', 'Number', 'undefined']);
+  walk.full(ast, (node) => {
+    if (node.type !== 'AssignmentExpression' && node.type !== 'UpdateExpression') return;
+    let target = (node.type === 'AssignmentExpression' ? node.left : node.argument) as { type: string; name?: string; object?: unknown; loc?: { start: { line: number } } };
+    const line = target.loc?.start.line;
+    while (target.type === 'MemberExpression') target = target.object as typeof target;
+    if (target.type !== 'Identifier' || !target.name || !locals.has(target.name) || shared.has(target.name)) {
+      throw new SourceError(`Assign only to the generator's own variables (line ${line}); ${target.name ?? 'this target'} cannot be changed.`);
     }
   });
   walk.ancestor(ast, {
