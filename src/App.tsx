@@ -6,6 +6,7 @@ import { runGenerator, type BuildResult } from './lib/builder';
 import { SAMPLE_SOURCE, SAMPLES } from './lib/sample';
 import { formatMM, paramValues, type Assumption, type ParamDef, type PlanSpec } from './lib/plan';
 import { runChecks, type CheckResults } from './lib/checks';
+import { applyFurnishing } from './lib/furniture';
 import { planToSVG, svgToPng } from './lib/plan-svg';
 import { PlanViewer, type ViewMode, type ViewerHandle } from './three/PlanViewer';
 import { exportGLB, exportPlan, exportSource, exportSVG } from './lib/exports';
@@ -27,13 +28,14 @@ async function imageFile(file: File | Blob) {
 }
 async function sampleImage(path: string) { return imageFile(await (await fetch(path)).blob()); }
 async function api(path: string, payload: object) {
-  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(900000) });
+  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(1500000) });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || 'Something went wrong. Please try again.');
   return result;
 }
-function versionFromBuild(id: number, source: string, result: BuildResult): Version {
-  return { id, source, ...result, originalParams: structuredClone(result.params), checks: runChecks(result.plan) };
+function versionFromBuild(id: number, source: string, result: BuildResult, autoFurniture = true): Version {
+  const plan = applyFurnishing(result.plan, autoFurniture);
+  return { id, source, ...result, plan, originalParams: structuredClone(result.params), checks: runChecks(plan) };
 }
 const orderedEntries = (params: Record<string, ParamDef>) => Object.entries(params).sort(([, a], [, b]) => a.group.localeCompare(b.group));
 
@@ -61,6 +63,7 @@ function App() {
   const [toast, setToast] = useState('');
   const [paramElapsed, setParamElapsed] = useState<number | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [autoFurniture, setAutoFurniture] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
   const viewerRef = useRef<ViewerHandle | null>(null);
   const runRef = useRef(0);
@@ -111,7 +114,7 @@ function App() {
         setProgress({ title: number === 1 ? 'Turning lines into geometry' : `Refining your plan · v${number}`, detail: firstValidId ? 'A newer version is being checked. Keep exploring the current one.' : 'Building in a sandbox. Engineering every connection.', step: 1 });
         try {
           const result = await runGenerator(code); if (runRef.current !== id) return;
-          next = versionFromBuild(number, code, result);
+          next = versionFromBuild(number, code, result, autoFurniture);
         } catch (e) {
           next = { id: number, source: code, plan: null, params: {}, originalParams: {}, assumptions: [], checks: null, repairs: [], error: (e as Error).message };
         }
@@ -135,9 +138,9 @@ function App() {
         const updated = { ...next, verdict: review.verdict, issues: review.issues, improvements: review.improvements };
         setVersions((old) => old.map((v) => v.id === number ? updated : v));
         const wantsRefinement = review.verdict === 'PASS' && review.improvements.length > 0;
-        if (review.code && (review.verdict === 'REVISE' || (wantsRefinement && !usedRefinement)) && number < 3) {
+        if ((review.verdict === 'REVISE' || (wantsRefinement && !usedRefinement && Boolean(review.code))) && number < 3) {
           if (wantsRefinement) usedRefinement = true;
-          code = review.code; continue;
+          code = review.code || code; continue;
         }
         setElapsed((performance.now() - started) / 1000); setProgress(null);
         if (firstValidId === null) setTab('checks');
@@ -165,12 +168,21 @@ function App() {
     setVersions((old) => old.map((v) => v.id === versionId ? { ...v, params: updatedParams } : v)); setUpdating(true);
     try {
       const result = await runGenerator(version.source, paramValues(updatedParams)); if (id !== editRef.current) return;
+      const rebuiltPlan = applyFurnishing(result.plan, autoFurniture);
       setParamElapsed(result.elapsed);
-      setVersions((old) => old.map((v) => v.id === versionId ? { ...v, plan: result.plan, params: updatedParams, checks: runChecks(result.plan), error: undefined } : v));
+      setVersions((old) => old.map((v) => v.id === versionId ? { ...v, plan: rebuiltPlan, params: updatedParams, checks: runChecks(rebuiltPlan), error: undefined } : v));
     } catch (e) {
       if (id !== editRef.current) return;
       setVersions((old) => old.map((v) => v.id === versionId ? { ...v, error: (e as Error).message } : v));
     } finally { if (id === editRef.current) setUpdating(false); }
+  };
+  const toggleAutoFurniture = () => {
+    const enabled = !autoFurniture; setAutoFurniture(enabled); editRef.current++;
+    setVersions((old) => old.map((v) => {
+      if (!v.plan) return v;
+      const furnished = applyFurnishing(v.plan, enabled);
+      return { ...v, plan: furnished, checks: runChecks(furnished) };
+    }));
   };
   const runExport = async (kind: string) => {
     if (!version?.plan) return;
@@ -247,14 +259,14 @@ function App() {
             {progress && !plan && <div className="generation-overlay"><div className="sketch-preview"><img src={sketch} alt="Your uploaded floor plan" /><span className="preview-tag"><span /> YOUR ORIGINAL</span></div><div className="generation-copy"><div className="generation-orbit"><span /><span /><Icon name="spark" size={25} /></div><span className="generation-kicker">SKETCH → GEOMETRY → SPACE</span><h2>{progress.title}<i className="loading-dots">...</i></h2><p>{progress.detail}</p><div className="generation-steps">{['Read the sketch', 'Build & check', 'Review the render'].map((step, i) => <div key={step} className={i < progress.step ? 'complete' : i === progress.step ? 'active' : ''}><span>{i < progress.step ? <Icon name="check" size={12} /> : `0${i + 1}`}</span>{step}</div>)}</div><p className="generation-small">Large sketches may take a minute. Good spaces are worth a moment.</p></div></div>}
             {!plan && !progress && <div className="empty-workspace"><Icon name="plan" size={42} /><h2>Let’s try that again.</h2><p>Your next walkthrough starts with the original sketch.</p><button className="primary-button" onClick={regenerate}>Retry this sketch <Icon name="reset" /></button></div>}
           </div>
-          <div className="viewport-footer"><div className="geometry-stats">{plan ? <><span><Icon name="plan" size={14} />{plan.rooms.length} rooms</span><i /><span>{plan.walls.length} walls</span><i /><span>{plan.openings.length} openings</span></> : <span className="muted">Waiting for your sketch…</span>}</div><div className="local-geometry"><span className={updating ? 'update-dot updating' : 'update-dot'} />{updating ? 'Rebuilding…' : 'LOCAL GEOMETRY'}{paramElapsed !== null && <span className="rebuild-time">{paramElapsed.toFixed(1)} ms</span>}</div></div>
+          <div className="viewport-footer"><div className="geometry-stats">{plan ? <><span><Icon name="plan" size={14} />{plan.rooms.length} rooms</span><i /><span>{plan.walls.length} walls</span><i /><span>{plan.openings.length} openings</span><i /><span data-furniture-count={plan.furniture.length}>{plan.furniture.length} furniture</span></> : <span className="muted">Waiting for your sketch…</span>}</div><div className="local-geometry"><span className={updating ? 'update-dot updating' : 'update-dot'} />{updating ? 'Rebuilding…' : 'LOCAL GEOMETRY'}{paramElapsed !== null && <span className="rebuild-time">{paramElapsed.toFixed(1)} ms</span>}</div></div>
         </section>
 
         <aside className="inspector">
           <div className="inspector-top"><div><span className="inspector-eyebrow">THE DETAILS</span><h2>Make it yours.</h2></div><Logo small /></div>
           <div className="inspector-tabs" role="tablist"><button role="tab" aria-selected={tab === 'dimensions'} className={tab === 'dimensions' ? 'active' : ''} onClick={() => setTab('dimensions')}>Dimensions</button><button role="tab" aria-selected={tab === 'assumptions'} className={tab === 'assumptions' ? 'active' : ''} onClick={() => setTab('assumptions')}>Assumptions{version?.assumptions.length ? <span>{version.assumptions.length}</span> : null}</button><button role="tab" aria-selected={tab === 'checks'} className={tab === 'checks' ? 'active' : ''} onClick={() => setTab('checks')}>Checks{version?.checks?.ok ? <i /> : version?.checks ? <b>!</b> : null}</button></div>
           <div className="inspector-scroll">
-            {tab === 'dimensions' && version ? <div className="dimensions-panel"><p className="panel-intro">A little adjustment, instantly.<br />Everything updates right here in your browser.</p>{paramEntries.filter(([, p]) => p.group === 'global').length > 0 && <div className="param-group"><h3><Icon name="sliders" size={14} /> GLOBAL DIMENSIONS</h3>{paramEntries.filter(([, p]) => p.group === 'global').map(([name, def]) => <DetailSlider key={name} name={name} def={def} value={def.value} onChange={(value) => editParam(name, value)} />)}</div>}{plan && plan.rooms.map((room) => { const entries = paramEntries.filter(([, p]) => p.group === 'room' && p.room === room.id); if (!entries.length) return null; return <div className="param-group room-group" key={room.id}><h3><span className={`floor-dot ${room.floor}`} />{room.name}<span className="room-unit">ROOM</span></h3>{entries.map(([name, def]) => <DetailSlider key={name} name={name} def={def} value={def.value} onChange={(value) => editParam(name, value)} />)}</div>; })}<div className="edit-note"><Icon name="spark" size={17} /><p>One slider. Every connected wall.<br /><span>Geometry is derived, not hardcoded.</span></p></div></div> : null}
+            {tab === 'dimensions' && version ? <div className="dimensions-panel"><p className="panel-intro">A little adjustment, instantly.<br />Everything updates right here in your browser.</p><div className="furniture-setting"><div><b>Furnish empty rooms</b><small>Defaults fit around doors and walkways.</small></div><button type="button" role="switch" aria-checked={autoFurniture} aria-label="Auto-furnish empty rooms" className={`furniture-toggle ${autoFurniture ? 'on' : ''}`} onClick={toggleAutoFurniture}><span /></button></div>{plan && plan.furniture.length > 0 && <div className="furniture-legend"><span><i className="from-sketch" />{plan.furniture.filter((f) => f.source === 'sketch').length} from your sketch</span><span><i className="from-default" />{plan.furniture.filter((f) => f.source === 'auto').length} added by default</span></div>}{paramEntries.filter(([, p]) => p.group === 'global').length > 0 && <div className="param-group"><h3><Icon name="sliders" size={14} /> GLOBAL DIMENSIONS</h3>{paramEntries.filter(([, p]) => p.group === 'global').map(([name, def]) => <DetailSlider key={name} name={name} def={def} value={def.value} onChange={(value) => editParam(name, value)} />)}</div>}{plan && plan.rooms.map((room) => { const entries = paramEntries.filter(([, p]) => p.group === 'room' && p.room === room.id); if (!entries.length) return null; return <div className="param-group room-group" key={room.id}><h3><span className={`floor-dot ${room.floor}`} />{room.name}<span className="room-unit">ROOM</span></h3>{entries.map(([name, def]) => <DetailSlider key={name} name={name} def={def} value={def.value} onChange={(value) => editParam(name, value)} />)}</div>; })}<div className="edit-note"><Icon name="spark" size={17} /><p>One slider. Every connected wall.<br /><span>Geometry is derived, not hardcoded.</span></p></div></div> : null}
             {tab === 'assumptions' && version ? <div className="assumptions-panel">
               <p className="panel-intro">Original assumptions stay verbatim. Current values are separate, so edits never rewrite what Kimi inferred.</p>
               {version.assumptions.length ? version.assumptions.map((a, i) => {

@@ -2,6 +2,31 @@ import { z } from 'zod';
 
 export const pointSchema = z.tuple([z.number(), z.number()]);
 
+export const FURNITURE_TYPES = [
+  'bed_double', 'bed_single', 'nightstand', 'wardrobe', 'sofa', 'armchair',
+  'coffee_table', 'tv_unit', 'dining_table', 'kitchen_run', 'kitchen_island',
+  'fridge', 'toilet', 'basin_vanity', 'bathtub', 'shower', 'desk', 'bookshelf',
+  'washer', 'car', 'plant', 'tree', 'gym_bike', 'yoga_mat', 'lounger',
+] as const;
+export type FurnitureType = typeof FURNITURE_TYPES[number];
+
+export const scheduleSchema = z.object({
+  roomId: z.string().min(1).max(80),
+  writtenWidth: z.number().positive().finite(),
+  writtenDepth: z.number().positive().finite(),
+  source: z.enum(['label', 'schedule']),
+});
+export const furnitureSchema = z.object({
+  id: z.string().min(1).max(100),
+  roomId: z.string().min(1).max(80),
+  type: z.enum(FURNITURE_TYPES),
+  position: pointSchema,
+  rotation: z.number().finite().min(-360).max(360).default(0),
+  size: z.tuple([z.number().positive().max(30000), z.number().positive().max(30000)]).optional(),
+  source: z.enum(['sketch', 'auto']).default('sketch'),
+});
+export type FurnitureItem = z.infer<typeof furnitureSchema>;
+
 export const planSchema = z.object({
   wallHeight: z.number().min(1800).max(6000),
   walls: z.array(z.object({
@@ -15,8 +40,10 @@ export const planSchema = z.object({
     id: z.string().min(1).max(80),
     name: z.string().min(1).max(80),
     polygon: z.array(pointSchema).min(3).max(64),
-    floor: z.enum(['wood', 'tile', 'carpet', 'concrete']),
+    floor: z.enum(['wood', 'tile', 'carpet', 'concrete', 'paving', 'grass', 'water']),
+    kind: z.enum(['indoor', 'open', 'outdoor']).default('indoor'),
   })).min(1).max(60),
+  schedule: z.array(scheduleSchema).max(60).optional(),
   openings: z.array(z.object({
     id: z.string().min(1).max(80),
     wallId: z.string().min(1).max(80),
@@ -27,6 +54,7 @@ export const planSchema = z.object({
     sill: z.number().min(0).optional(),
     swing: z.enum(['left', 'right']).optional(),
   })).max(400),
+  furniture: z.array(furnitureSchema).max(1000).default([]),
   entry: z.object({ position: pointSchema, facing: z.number().min(0).max(360) }),
 });
 export type PlanSpec = z.infer<typeof planSchema>;

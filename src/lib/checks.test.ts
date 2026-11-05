@@ -105,7 +105,7 @@ describe('deterministic engineering checks', () => {
   it('passes the sample, including entry reachability', () => {
     const result = runChecks(plan);
     expect(result.failures).toEqual([]);
-    expect(result.checks).toHaveLength(4);
+    expect(result.checks).toHaveLength(6);
     expect(result.ok).toBe(true);
   });
   it('rejects an open exterior loop', () => {

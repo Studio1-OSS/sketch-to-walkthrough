@@ -34,34 +34,42 @@ async function completion(messages, kind, maxTokens = 18000) {
       method: 'POST',
       headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: MODEL, messages: requestMessages, stream: true, stream_options: { include_usage: true }, reasoning_effort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT, max_tokens: maxTokens, temperature: 0.2 }),
-      signal: AbortSignal.timeout(600000),
+      signal: AbortSignal.timeout(Number(process.env.MODEL_REQUEST_TIMEOUT_MS || 1200000)),
     });
     if (!response.ok) throw new Error(`Model API ${response.status}: ${(await response.text()).slice(0, 600)}`);
     if (!response.body) throw new Error('Model returned no response stream.');
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '', content = '', finishReason = null, usage = null, completed = false, failure = null;
+    const consume = (line) => {
+      if (!line.startsWith('data: ')) return;
+      const data = line.slice(6).trim();
+      if (data === '[DONE]') { completed = true; return; }
+      try {
+        const json = JSON.parse(data);
+        const choice = json.choices?.[0];
+        if (choice?.delta?.content) content += choice.delta.content;
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+        if (json.usage) usage = json.usage;
+      } catch { /* SSE keepalive or non-JSON event. */ }
+    };
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n'); buffer = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') { completed = true; continue; }
-          try {
-            const json = JSON.parse(data);
-            const choice = json.choices?.[0];
-            if (choice?.delta?.content) content += choice.delta.content;
-            if (choice?.finish_reason) finishReason = choice.finish_reason;
-            if (json.usage) usage = json.usage;
-          } catch { /* SSE keepalive or non-JSON event. */ }
-        }
+        for (const line of lines) consume(line);
       }
+      buffer += decoder.decode();
+      if (buffer) consume(buffer);
+      reader.releaseLock();
     } catch (error) { failure = error; }
     prefix += content;
+    if (!prefix) {
+      console.warn(`[${MODEL}] ${kind}: no content returned (${failure?.message || finishReason || 'incomplete response'}); retrying (${attempt + 1}/3).`);
+      continue;
+    }
     if (!failure && (completed || response.body.locked === false) && finishReason !== 'length') {
       const elapsed = (performance.now() - started) / 1000;
       const tokens = usage?.completion_tokens ?? 0;
@@ -70,7 +78,6 @@ async function completion(messages, kind, maxTokens = 18000) {
       console.log(`[${MODEL}] ${kind}: ${tokens} completion tokens (${reasoning ?? 'unknown'} reasoning), ${tokensPerSecond} tokens/sec, ${elapsed.toFixed(1)}s`);
       return { text: prefix, usage: { prompt: usage?.prompt_tokens ?? 0, completion: tokens, total: usage?.total_tokens ?? 0, reasoning }, elapsed: Math.round(elapsed * 100) / 100, tokensPerSecond, model: MODEL, reasoningEffort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT };
     }
-    if (!prefix) throw new Error(`Model stream failed before returning content: ${failure?.message || 'incomplete response'}`);
     console.warn(`[${MODEL}] ${kind}: interrupted response, continuing ${prefix.length} characters (${attempt + 1}/3).`);
   }
   throw new Error('Model stream was interrupted three times. Please try again.');
@@ -104,7 +111,7 @@ app.post('/api/review', async (c) => {
       { type: 'text', text: `DETERMINISTIC RESULTS:\n${checks}\n\nCURRENT GENERATOR:\n${body.code}\n\n${body.buildError ? `BUILD OR VALIDATION ERROR: ${String(body.buildError).slice(0, 1000)}` : 'The generator executed and validated. The following image is the top-down orthographic capture from the app canvas.'}` },
     ];
     if (typeof body.render === 'string' && body.render.startsWith('data:image/png')) content.push(imagePart(body.render));
-    const result = await completion([{ role: 'system', content: reviewPrompt }, { role: 'user', content }], 'review', 24000);
+    const result = await completion([{ role: 'system', content: reviewPrompt }, { role: 'user', content }], 'review', 40000);
     let review;
     try {
       const clean = result.text.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/```$/, '');

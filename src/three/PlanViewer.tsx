@@ -7,6 +7,7 @@ import { planBounds } from '../lib/plan-svg';
 import { runChecks } from '../lib/checks';
 import { collides, getWalkSpawn, minimumWallDistance } from '../lib/walkthrough';
 import type { PlanSpec } from '../lib/plan';
+import { pointInPolygon } from '../lib/furniture';
 
 export type ViewMode = 'plan' | 'dollhouse' | 'walk';
 export type ViewerHandle = {
@@ -41,7 +42,7 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
     sun.shadow.mapSize.set(2048, 2048); sun.shadow.camera.left = -14; sun.shadow.camera.right = 14; sun.shadow.camera.top = 14; sun.shadow.camera.bottom = -14;
     sun.shadow.normalBias = 0.03; sun.shadow.bias = -0.00015; sun.shadow.radius = 3; scene.add(sun);
     const ground = new THREE.Mesh(new THREE.PlaneGeometry(180, 180), new THREE.MeshStandardMaterial({ color: '#e4e8df', roughness: 1 }));
-    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.025; ground.receiveShadow = true; scene.add(ground);
+    ground.rotation.x = -Math.PI / 2; ground.position.y = -0.24; ground.receiveShadow = true; scene.add(ground);
     const world = buildWorld(stateRef.current.plan, { labels: stateRef.current.labels, ceiling: stateRef.current.mode === 'walk', walkthrough: stateRef.current.mode === 'walk' });
     world.userData = { plan: stateRef.current.plan, labels: stateRef.current.labels, ceiling: stateRef.current.mode === 'walk' }; scene.add(world);
     const top = new THREE.OrthographicCamera(-6, 6, 6, -6, 0.01, 250); top.up.set(0, 0, -1);
@@ -97,9 +98,14 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
         if (!(object instanceof THREE.Sprite) || !object.userData.roomLabel) return;
         if (camera instanceof THREE.PerspectiveCamera) {
           const factor = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / height;
-          object.scale.set(210 * factor, 46 * factor, 1);
+          const screenWidth = stateRef.current.mode === 'walk' ? 110 : 3200;
+          const labelWidth = stateRef.current.mode === 'walk'
+            ? Math.min(screenWidth * factor, (object.userData.maxWidthMM ?? 4000) / 1000)
+            : Math.min(screenWidth / 1000, (object.userData.maxWidthMM ?? 4000) / 1000);
+          object.scale.set(labelWidth, labelWidth * 240 / 512, 1);
         } else {
-          object.scale.set(210 * (camera.right - camera.left) / width, 46 * (camera.top - camera.bottom) / height, 1);
+          const labelWidth = Math.min(210 * (camera.right - camera.left) / width, (object.userData.maxWidthMM ?? 4000) / 1000);
+          object.scale.set(labelWidth, labelWidth * 240 / 512, 1);
         }
       });
       host.dataset.labelsOccluded = String(stateRef.current.mode === 'walk');
@@ -107,6 +113,7 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
     const observer = new ResizeObserver(resize); observer.observe(host); resize(); reset();
     r.applyMode = () => {
       const currentMode = stateRef.current.mode;
+      r.world.traverse((object) => { if (object.userData.roomLabel) object.visible = true; });
       orbit.enabled = currentMode !== 'walk'; orbit.enableRotate = currentMode === 'dollhouse'; orbit.object = currentMode === 'plan' ? top : doll;
       if (currentMode !== 'walk' && pointer.isLocked) pointer.unlock();
       if (currentMode === 'walk') { placeWalk(); resize(); }
@@ -123,6 +130,15 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
       const dt = Math.min((now - previous) / 1000, 0.05); previous = now;
       if (stateRef.current.mode === 'walk') {
         const current: [number, number] = [walk.position.x * 1000, -walk.position.z * 1000];
+        const currentRoom = stateRef.current.plan.rooms.find((room) => pointInPolygon(current, room.polygon))?.id;
+        let visibleLabels = 0;
+        r.world.traverse((object) => {
+          if (!object.userData.roomLabel) return;
+          object.visible = object.userData.roomId === currentRoom;
+          if (object.visible) visibleLabels++;
+        });
+        host.dataset.visibleLabel = currentRoom ?? '';
+        host.dataset.visibleLabels = String(visibleLabels);
         let forward = Number(keys.has('KeyW') || keys.has('ArrowUp')) - Number(keys.has('KeyS') || keys.has('ArrowDown')) + r.joystick.y;
         let side = Number(keys.has('KeyD') || keys.has('ArrowRight')) - Number(keys.has('KeyA') || keys.has('ArrowLeft')) + r.joystick.x;
         const norm = Math.max(1, Math.hypot(forward, side)); forward /= norm; side /= norm;
@@ -164,5 +180,5 @@ export const PlanViewer = forwardRef<ViewerHandle, Props>(function PlanViewer({ 
 
   useEffect(() => { runtime.current?.applyMode(); }, [mode]);
   useImperativeHandle(forwardedRef, () => ({ reset: () => handleRef.current?.reset(), startWalk: () => handleRef.current?.startWalk(), setJoystick: (x, y) => handleRef.current?.setJoystick(x, y) }), []);
-  return <div className={`viewer-host ${className}`} ref={hostRef} data-mode={mode} data-checks={runChecks(plan).ok ? 'pass' : 'fail'} />;
+  return <div className={`viewer-host ${className}`} ref={hostRef} data-mode={mode} data-checks={runChecks(plan).ok ? 'pass' : 'fail'} data-furniture={plan.furniture.length} data-open-rooms={plan.rooms.filter((room) => room.kind !== 'indoor').map((room) => room.id).join(',')} />;
 });

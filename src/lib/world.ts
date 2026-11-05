@@ -1,10 +1,13 @@
 import * as THREE from 'three';
-import { roomCenter, type PlanSpec } from './plan';
+import { type PlanSpec } from './plan';
+import { buildFurnitureItem } from './furniture-world';
+import { roomLabelLayout } from './label-layout';
+import { interiorAnchor } from './label-layout';
 
 const wallMat = new THREE.MeshStandardMaterial({ color: '#f6f3e9', roughness: 0.87 });
 const wallCapMat = new THREE.MeshStandardMaterial({ color: '#e6e4d9', roughness: 0.9 });
 const FRAME = '#e6e9dc';
-const floorColors: Record<PlanSpec['rooms'][number]['floor'], string> = { wood: '#cbb18a', tile: '#b8c9c3', carpet: '#cec3b0', concrete: '#c0c4c1' };
+const floorColors: Record<PlanSpec['rooms'][number]['floor'], string> = { wood: '#cbb18a', tile: '#b8c9c3', carpet: '#cec3b0', concrete: '#c0c4c1', paving: '#d1cbbc', grass: '#9eb38e', water: '#73b4b0' };
 const toWorld = (p: [number, number], height = 0) => new THREE.Vector3(p[0] / 1000, height / 1000, -p[1] / 1000);
 
 function textureFor(floor: PlanSpec['rooms'][number]['floor']) {
@@ -27,18 +30,25 @@ function textureFor(floor: PlanSpec['rooms'][number]['floor']) {
   return texture;
 }
 
-function labelSprite(text: string, walkthrough: boolean) {
-  const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 112;
+function labelSprite(room: PlanSpec['rooms'][number], walkthrough: boolean) {
+  const layout = roomLabelLayout(room, 0.08, 30), canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 240;
   const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = '#173e37e8'; ctx.beginPath(); ctx.roundRect(75, 10, 362, 82, 28); ctx.fill();
-  ctx.font = '500 29px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#f5f7ed'; ctx.fillText(text, 256, 53, 320);
+  const lines = [...layout.nameLines, layout.area];
+  const fit = Math.min(6, 450 / Math.max(1, layout.maxWidthMM * 0.08), 200 / (lines.length * 1.08));
+  const font = Math.max(12, layout.fontSize * fit), lineHeight = font * 1.08;
+  const block = lines.length * lineHeight;
+  ctx.fillStyle = '#173e37df'; ctx.beginPath(); ctx.roundRect(22, 120 - block / 2 - 8, 468, block + 16, 22); ctx.fill();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#f5f7ed';
+  lines.forEach((line, index) => {
+    ctx.font = `${index === lines.length - 1 ? 400 : 500} ${index === lines.length - 1 ? font * 0.78 : font}px Arial`;
+    ctx.fillText(line, 256, 120 - block / 2 + lineHeight * (index + 0.5), 440);
+  });
   const map = new THREE.CanvasTexture(canvas); map.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-    map, transparent: true, depthTest: walkthrough, depthWrite: false, sizeAttenuation: false,
-    // Give a directly-visible room label priority over its floor, never over a nearer wall.
+    map, transparent: true, depthTest: walkthrough, depthWrite: false, sizeAttenuation: !walkthrough,
     polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
   }));
-  sprite.userData.roomLabel = true; sprite.renderOrder = walkthrough ? 0 : 5;
+  sprite.userData.roomLabel = true; sprite.userData.maxWidthMM = layout.maxWidthMM; sprite.userData.roomId = room.id; sprite.renderOrder = walkthrough ? 0 : 5;
   return sprite;
 }
 
@@ -54,18 +64,26 @@ export function buildWorld(plan: PlanSpec, options: { labels?: boolean; ceiling?
   for (const room of plan.rooms) {
     const shape = new THREE.Shape(room.polygon.map(([x, y]) => new THREE.Vector2(x, y)));
     const geometry = new THREE.ShapeGeometry(shape); geometry.rotateX(-Math.PI / 2);
-    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: '#ffffff', map: textureFor(room.floor), roughness: 0.9, side: THREE.DoubleSide }));
-    mesh.scale.set(0.001, 1, 0.001); mesh.position.y = 0.012; mesh.receiveShadow = true; mesh.name = `${room.name} floor`; group.add(mesh);
-    if (options.ceiling) {
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: '#ffffff', map: textureFor(room.floor), roughness: room.floor === 'water' ? 0.18 : 0.9, transparent: room.floor === 'water', opacity: room.floor === 'water' ? 0.88 : 1, side: THREE.DoubleSide }));
+    mesh.scale.set(0.001, 1, 0.001); mesh.position.y = room.floor === 'water' ? -0.18 : 0.012; mesh.receiveShadow = true; mesh.name = `${room.name} floor`; mesh.userData = { roomId: room.id, floor: room.floor, recessed: room.floor === 'water' }; group.add(mesh);
+    if (room.floor === 'water') for (let i = 0; i < room.polygon.length; i++) {
+      const a = room.polygon[i], b = room.polygon[(i + 1) % room.polygon.length], length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const coping = box(group, length + 160, 150, 160, 0, -35, wallMat);
+      if (coping) { coping.name = `${room.name} coping`; coping.position.set((a[0] + b[0]) / 2000, -0.035, -(a[1] + b[1]) / 2000); coping.rotation.y = Math.atan2(b[1] - a[1], b[0] - a[0]); }
+    }
+    if (options.ceiling && room.kind !== 'open' && room.kind !== 'outdoor') {
       const ceiling = new THREE.Mesh(geometry.clone(), new THREE.MeshStandardMaterial({ color: '#f4f3e9', roughness: 1, side: THREE.DoubleSide }));
-      ceiling.scale.set(0.001, 1, 0.001); ceiling.position.y = height / 1000; ceiling.name = `${room.name} ceiling`; group.add(ceiling);
+      ceiling.scale.set(0.001, 1, 0.001); ceiling.position.y = height / 1000; ceiling.name = `${room.name} ceiling`; ceiling.userData = { roomId: room.id, ceiling: true }; group.add(ceiling);
     }
     if (options.labels) {
-      const label = labelSprite(room.name, options.walkthrough ?? false);
-      label.name = `${room.name} label`; label.userData.roomId = room.id;
-      label.position.copy(toWorld(roomCenter(room.polygon), 1800)); group.add(label);
+      const label = labelSprite(room, options.walkthrough ?? false);
+      label.name = `${room.name} label`;
+      label.position.copy(toWorld(interiorAnchor(room.polygon), 1800)); group.add(label);
     }
   }
+  for (const item of plan.furniture) group.add(buildFurnitureItem(item));
+  group.userData.furnitureCount = plan.furniture.length;
+  group.userData.openRoomIds = plan.rooms.filter((room) => room.kind === 'open' || room.kind === 'outdoor').map((room) => room.id);
   const frameMaterial = new THREE.MeshStandardMaterial({ color: FRAME, roughness: 0.58 });
   const doorMaterial = new THREE.MeshStandardMaterial({ color: '#9d7753', roughness: 0.75 });
   const glassMaterial = new THREE.MeshPhysicalMaterial({ color: '#b3dfdd', metalness: 0.1, roughness: 0.12, transparent: true, opacity: 0.3, side: THREE.DoubleSide });

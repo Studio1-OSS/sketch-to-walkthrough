@@ -1,4 +1,5 @@
 import { roomCenter, type PlanSpec } from './plan';
+import { checkFurnitureGeometry, roomHasDoorPaths } from './furniture';
 
 export type Check = { id: string; title: string; ok: boolean; detail: string };
 export type CheckResults = { checks: Check[]; failures: string[]; ok: boolean };
@@ -102,7 +103,7 @@ export function runChecks(plan: PlanSpec): CheckResults {
     const room = plan.rooms[i];
     if (!polygonSimple(room.polygon)) badRooms.push(`Room ${room.id} has a self-intersecting, zero-length, or near-zero-area polygon.`);
     if (orderedExterior.length >= 4 && exterior.length > 3) {
-      if (!room.polygon.every((p) => pointInPolygon(p, orderedExterior))) badRooms.push(`Room ${room.id} extends outside the exterior envelope.`);
+      if (room.kind !== 'outdoor' && !room.polygon.every((p) => pointInPolygon(p, orderedExterior))) badRooms.push(`Room ${room.id} extends outside the exterior envelope.`);
     }
     for (let j = i + 1; j < plan.rooms.length; j++) {
       const other = plan.rooms[j];
@@ -115,7 +116,24 @@ export function runChecks(plan: PlanSpec): CheckResults {
       if (edgesCross || pointInPolygon(roomCenter(room.polygon), other.polygon) || pointInPolygon(roomCenter(other.polygon), room.polygon)) badRooms.push(`Rooms ${room.id} and ${other.id} overlap.`);
     }
   }
-  add('rooms', 'Room geometry', badRooms, 'Room polygons are valid, non-overlapping, and inside the exterior.');
+  add('rooms', 'Room geometry', badRooms, 'Room polygons are valid, non-overlapping; outdoor areas may extend beyond the exterior.');
+
+  const badSizes: string[] = [], scheduledRooms = new Set<string>();
+  for (const entry of plan.schedule ?? []) {
+    const room = plan.rooms.find((r) => r.id === entry.roomId);
+    if (!room) { badSizes.push(`Schedule references missing room ${entry.roomId}.`); continue; }
+    if (scheduledRooms.has(room.id)) badSizes.push(`Room ${room.name} has duplicate written-size entries.`);
+    scheduledRooms.add(room.id);
+    const xs = room.polygon.map((p) => p[0]), ys = room.polygon.map((p) => p[1]);
+    const actual: [number, number] = [Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)];
+    const written: [number, number] = [entry.writtenWidth, entry.writtenDepth];
+    const matches = [[actual[0], actual[1]], [actual[1], actual[0]]].some((oriented) => oriented.every((value, axis) => {
+      const tolerance = Math.max(150, written[axis] * 0.1);
+      return Math.abs(value - written[axis]) <= tolerance + 0.001;
+    }));
+    if (!matches) badSizes.push(`Room ${room.name} is ${Math.round(actual[0])} × ${Math.round(actual[1])} mm; written size is ${entry.writtenWidth} × ${entry.writtenDepth} mm (±10% or ±150 mm, whichever is larger, either orientation).`);
+  }
+  add('sizes', 'Written room sizes', badSizes, plan.schedule?.length ? `${plan.schedule.length} written room sizes match their polygons within tolerance.` : 'No written room-size schedule was supplied.');
 
   const badOpenings: string[] = [], wallById = new Map(plan.walls.map((w) => [w.id, w]));
   for (const opening of plan.openings) {
@@ -165,6 +183,11 @@ export function runChecks(plan: PlanSpec): CheckResults {
     if (minWidth < 900) reachability.push(`Hallway ${room.name} is only ${Math.round(minWidth)} mm wide; minimum is 900 mm.`);
   }
   add('access', 'Access from entry', reachability, 'Every room connects to the entry. Hallway clearances are at least 900 mm.');
+
+  const badFurniture = checkFurnitureGeometry(plan).map((issue) => `Furniture ${issue.itemId} ${issue.message}`);
+  for (const room of plan.rooms) if (!roomHasDoorPaths(room, plan)) badFurniture.push(`Room ${room.name} has no 600 mm walkable path from every door into the room around its furniture.`);
+  const sketchCount = plan.furniture.filter((f) => f.source === 'sketch').length, autoCount = plan.furniture.length - sketchCount;
+  add('furniture', 'Furniture & circulation', badFurniture, plan.furniture.length ? `${plan.furniture.length} items fit their rooms, avoid openings and preserve 600 mm paths (${sketchCount} from sketch, ${autoCount} added by default).` : 'No furniture placed; circulation is unobstructed.');
   const failures = checks.filter((c) => !c.ok).flatMap((c) => [`${c.title}: ${c.detail}`]);
   return { checks, failures, ok: !failures.length };
 }

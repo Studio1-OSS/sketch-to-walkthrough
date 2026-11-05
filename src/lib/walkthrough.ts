@@ -1,5 +1,6 @@
 import { pointSegmentDistance } from './checks';
 import { roomCenter, type PlanSpec } from './plan';
+import { FURNITURE_CATALOGUE, itemDimensions, itemRect, pointInPolygon } from './furniture';
 
 export const BODY_RADIUS = 210;
 
@@ -7,6 +8,12 @@ type Point = [number, number];
 export type WalkSpawn = { position: Point; facing: number; roomId: string; clearance: number };
 
 export function collides(p: Point, plan: PlanSpec) {
+  const furnitureHit = plan.furniture.some((item) => {
+    if (!FURNITURE_CATALOGUE[item.type].collision) return false;
+    const padded = { ...item, size: itemDimensions(item).map((n) => n + BODY_RADIUS * 2) as [number, number] };
+    return pointInPolygon(p, itemRect(padded).corners);
+  });
+  if (furnitureHit) return true;
   return plan.walls.some((wall) => {
     if (pointSegmentDistance(p, wall.a, wall.b) >= BODY_RADIUS + wall.thickness / 2) return false;
     const length = Math.hypot(wall.b[0] - wall.a[0], wall.b[1] - wall.a[1]);

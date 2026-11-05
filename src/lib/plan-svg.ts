@@ -1,9 +1,11 @@
 import type { PlanSpec } from './plan';
+import { furnitureToSVG } from './furniture-svg';
+import { roomLabelLayout } from './label-layout';
 
 export type PlanStyle = 'light' | 'dark';
 export const palette = {
-  light: { bg: '#ffffff', wall: '#203f38', interior: '#537368', text: '#203f38', dim: '#728076', grid: '#edf0e8', opening: '#ffffff', wood: '#e6d7b9', tile: '#d8e4df', carpet: '#e4ddd3', concrete: '#dbdfdc' },
-  dark: { bg: '#eff0e9', wall: '#203f38', interior: '#63786c', text: '#203f38', dim: '#798274', grid: '#e4e8dd', opening: '#ffffff', wood: '#e9dcc3', tile: '#dce7e1', carpet: '#e6e0d6', concrete: '#e0e3df' },
+  light: { bg: '#ffffff', wall: '#203f38', interior: '#537368', text: '#203f38', dim: '#728076', grid: '#edf0e8', opening: '#ffffff', wood: '#e6d7b9', tile: '#d8e4df', carpet: '#e4ddd3', concrete: '#dbdfdc', paving: '#dedbcf', grass: '#d9e4d1', water: '#bcdcda' },
+  dark: { bg: '#eff0e9', wall: '#203f38', interior: '#63786c', text: '#203f38', dim: '#798274', grid: '#e4e8dd', opening: '#ffffff', wood: '#e9dcc3', tile: '#dce7e1', carpet: '#e6e0d6', concrete: '#e0e3df', paving: '#e2dfd4', grass: '#dce6d5', water: '#c1e0de' },
 };
 
 export function planBounds(plan: PlanSpec) {
@@ -20,11 +22,17 @@ export function planToSVG(plan: PlanSpec, options: { width?: number; dark?: bool
   const u = (x: number) => (x - bounds.minX + margin) / totalW * width;
   const v = (y: number) => height - (y - bounds.minY + margin) / totalH * height;
   const scale = width / totalW;
-  const roomMarkup = plan.rooms.map((room) => {
+  const floors = plan.rooms.map((room, index) => {
     const points = room.polygon.map(([x, y]) => `${u(x)},${v(y)}`).join(' ');
-    const cx = room.polygon.reduce((s, p) => s + p[0], 0) / room.polygon.length, cy = room.polygon.reduce((s, p) => s + p[1], 0) / room.polygon.length;
-    const area = Math.abs(room.polygon.reduce((s, p, i) => { const q = room.polygon[(i + 1) % room.polygon.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0) / 2e6);
-    return `<polygon points="${points}" fill="${colors[room.floor]}" stroke="none"/><text x="${u(cx)}" y="${v(cy)}" text-anchor="middle" font-family="Arial,sans-serif" font-weight="600" font-size="${Math.max(13, width / 60)}" fill="${colors.text}">${escapeXml(room.name)}</text><text x="${u(cx)}" y="${v(cy) + width / 55}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${width / 80}" fill="${colors.dim}">${area.toFixed(1)} m²</text>`;
+    return `<polygon points="${points}" fill="${colors[room.floor]}" stroke="none"/><clipPath id="room-label-${index}"><polygon points="${points}"/></clipPath>${room.floor === 'water' ? `<polygon points="${points}" fill="none" stroke="#82aaa1" stroke-width="${Math.max(2, 120 * scale)}"/>` : ''}`;
+  }).join('');
+  const furniture = plan.furniture.map((item) => furnitureToSVG(item, u, v, scale)).join('');
+  const roomLabels = plan.rooms.map((room, index) => {
+    const label = roomLabelLayout(room, scale, Math.max(13, width / 60));
+    const x = u(label.center[0]), y = v(label.center[1]), lineHeight = label.fontSize * 1.08;
+    const blockHeight = (label.nameLines.length + 0.9) * lineHeight, start = y - blockHeight / 2 + label.fontSize;
+    const names = label.nameLines.map((line, i) => `<text x="${x}" y="${start + i * lineHeight}" text-anchor="middle" font-family="Arial,sans-serif" font-weight="600" font-size="${label.fontSize}" fill="${colors.text}">${escapeXml(line)}</text>`).join('');
+    return `<g clip-path="url(#room-label-${index})" data-room-label="${escapeXml(room.id)}">${names}<text x="${x}" y="${start + label.nameLines.length * lineHeight}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${label.fontSize * 0.78}" fill="${colors.dim}">${label.area}</text></g>`;
   }).join('');
   const walls = plan.walls.map((wall) => {
     const dx = wall.b[0] - wall.a[0], dy = wall.b[1] - wall.a[1], length = Math.hypot(dx, dy);
@@ -55,7 +63,7 @@ export function planToSVG(plan: PlanSpec, options: { width?: number; dark?: bool
   const grid = [];
   for (let x = Math.ceil(bounds.minX / 1000) * 1000; x < bounds.maxX; x += 1000) grid.push(`<line x1="${u(x)}" y1="${v(bounds.minY)}" x2="${u(x)}" y2="${v(bounds.maxY)}" stroke="${colors.grid}" stroke-width="0.7"/>`);
   for (let y = Math.ceil(bounds.minY / 1000) * 1000; y < bounds.maxY; y += 1000) grid.push(`<line x1="${u(bounds.minX)}" y1="${v(y)}" x2="${u(bounds.maxX)}" y2="${v(y)}" stroke="${colors.grid}" stroke-width="0.7"/>`);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="${width}" height="${height}" fill="${colors.bg}"/>${grid.join('')}${roomMarkup}${walls}${dimensions}<text x="${width - 22}" y="${height - 18}" text-anchor="end" font-family="Arial,sans-serif" font-size="11" fill="${colors.dim}" letter-spacing="1.5">SKETCH TO WALKTHROUGH · ALL DIMENSIONS IN MM</text></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="${width}" height="${height}" fill="${colors.bg}"/>${grid.join('')}${floors}${furniture}${walls}${roomLabels}${dimensions}<text x="${width - 22}" y="${height - 18}" text-anchor="end" font-family="Arial,sans-serif" font-size="11" fill="${colors.dim}" letter-spacing="1.5">SKETCH TO WALKTHROUGH · ALL DIMENSIONS IN MM</text></svg>`;
 }
 function escapeXml(value: string) { return value.replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]!)); }
 

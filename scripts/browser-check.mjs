@@ -47,6 +47,53 @@ try {
   await page.waitForSelector('.canvas-wrap .viewer-host[data-ready="true"]', { timeout: 60000 }); await wait(700); await shot('02-dollhouse');
   record('Prepared demo passes all engineering checks', await page.locator('.canvas-wrap .viewer-host').getAttribute('data-checks') === 'pass');
   record('Prepared demo includes 5 rooms and 9 openings', (await page.locator('.geometry-stats').innerText()).includes('5 rooms') && (await page.locator('.geometry-stats').innerText()).includes('9 openings'));
+  const furnishedCount = Number(await page.locator('.canvas-wrap .viewer-host').getAttribute('data-furniture'));
+  record('Auto-furnished furniture renders in the studio', furnishedCount > 8 && (await page.locator('.furniture-legend').innerText()).includes('added by default'), { furnishedCount });
+  await page.getByRole('switch', { name: 'Auto-furnish empty rooms' }).click(); await wait(250);
+  record('Auto-furnish toggle removes only default items', await page.getByRole('switch', { name: 'Auto-furnish empty rooms' }).getAttribute('aria-checked') === 'false' && Number(await page.locator('.canvas-wrap .viewer-host').getAttribute('data-furniture')) === 0);
+  await page.getByRole('switch', { name: 'Auto-furnish empty rooms' }).click(); await wait(250);
+  const furnitureWorld = await page.evaluate(async () => {
+    const { buildWorld, disposeWorld } = await import('/src/lib/world.ts');
+    const { buildFurnitureItem, FURNITURE_BUILDERS } = await import('/src/lib/furniture-world.ts');
+    const { buildFromModule } = await import('/src/lib/module.ts');
+    const { SAMPLE_SOURCE } = await import('/src/lib/sample.ts');
+    const { applyFurnishing } = await import('/src/lib/furniture.ts');
+    const { FURNITURE_TYPES } = await import('/src/lib/plan.ts');
+    const raw = buildFromModule(SAMPLE_SOURCE).plan;
+    const world = buildWorld(applyFurnishing(raw, true), { labels: true, ceiling: true });
+    let furnitureRoots = 0, meshes = 0, instanced = 0;
+    world.traverse((o) => { if (o.userData.furniture) furnitureRoots++; if (o.isMesh) meshes++; if (o.isInstancedMesh) instanced++; });
+    const everyBuilder = FURNITURE_TYPES.every((type) => {
+      const item = buildFurnitureItem({ id: `test-${type}`, roomId: 'living', type, position: [2500, 2000], rotation: 0, source: 'auto' });
+      let count = 0, instances = 0; item.traverse((o) => { if (o.isMesh) count++; if (o.isInstancedMesh) instances++; });
+      return Object.keys(FURNITURE_BUILDERS).includes(type) && count > 0 && (!['dining_table', 'plant', 'tree'].includes(type) || instances > 0);
+    });
+    raw.rooms[0].kind = 'open'; raw.rooms[0].floor = 'paving'; raw.rooms[1].kind = 'outdoor'; raw.rooms[1].floor = 'water';
+    const outdoorWorld = buildWorld(raw, { ceiling: true, labels: true });
+    let openCeilings = 0, indoorCeilings = 0, recessedWater = 0, coping = 0, fittedLabels = 0;
+    outdoorWorld.traverse((o) => {
+      if (o.userData.ceiling && o.userData.roomId === 'living') openCeilings++;
+      if (o.userData.ceiling) indoorCeilings++;
+      if (o.userData.floor === 'water' && o.userData.recessed && o.position.y < 0) recessedWater++;
+      if (o.name.includes('coping')) coping++;
+      if (o.userData.roomLabel && o.userData.maxWidthMM > 0) fittedLabels++;
+    });
+    const openData = { openCeilings, indoorCeilings, recessedWater, coping, fittedLabels };
+    disposeWorld(world); disposeWorld(outdoorWorld);
+    return { furnitureRoots, meshes, instanced, everyBuilder, openData };
+  });
+  record('Every furniture builder creates low-poly geometry, with instancing for chairs and plants', furnitureWorld.everyBuilder && furnitureWorld.furnitureRoots === furnishedCount && furnitureWorld.meshes > furnitureWorld.furnitureRoots, furnitureWorld);
+  record('Open/outdoor rooms have no ceiling and pools have recessed water with coping', furnitureWorld.openData.openCeilings === 0 && furnitureWorld.openData.indoorCeilings === 3 && furnitureWorld.openData.recessedWater === 1 && furnitureWorld.openData.coping === 4, furnitureWorld.openData);
+  record('3D room labels carry room-fitted dimensions', furnitureWorld.openData.fittedLabels === 5, { fittedLabels: furnitureWorld.openData.fittedLabels });
+  const furnitureCollision = await page.evaluate(async () => {
+    const { buildFromModule } = await import('/src/lib/module.ts');
+    const { SAMPLE_SOURCE } = await import('/src/lib/sample.ts');
+    const { collides } = await import('/src/lib/walkthrough.ts');
+    const plan = buildFromModule(SAMPLE_SOURCE).plan;
+    plan.furniture = [{ id: 'collision-bed', roomId: 'living', type: 'bed_double', position: [2500, 1900], rotation: 0, source: 'sketch' }, { id: 'walkable-mat', roomId: 'living', type: 'yoga_mat', position: [4500, 3000], rotation: 0, source: 'sketch' }];
+    return { bed: collides([2500, 1900], plan), bodyEdge: collides([2500, 1050], plan), clear: collides([1200, 1900], plan), mat: collides([4500, 3000], plan) };
+  });
+  record('Walkthrough collision blocks furniture bodies and allows mats', furnitureCollision.bed && furnitureCollision.bodyEdge && !furnitureCollision.clear && !furnitureCollision.mat, furnitureCollision);
   const timeoutProbe = await page.evaluate(async () => {
     const { runGenerator } = await import('/src/lib/builder.ts');
     const { SAMPLE_SOURCE } = await import('/src/lib/sample.ts');
@@ -78,8 +125,11 @@ try {
   const newSvg = await page.locator('.plan-overlay img').getAttribute('src');
   record('Parameter edits change local plan geometry', oldSvg !== newSvg);
   await page.getByRole('tab', { name: 'Dollhouse', exact: true }).click(); await wait(300);
-  const glb = await download('3D model'); const header = fs.readFileSync(glb.path).subarray(0, 4).toString();
+  const glb = await download('3D model'), glbBuffer = fs.readFileSync(glb.path), header = glbBuffer.subarray(0, 4).toString();
+  const glbJson = JSON.parse(glbBuffer.subarray(20, 20 + glbBuffer.readUInt32LE(12)).toString());
+  const glbFurniture = (glbJson.nodes || []).filter((node) => node.extras?.furniture);
   record('GLB export has a valid binary glTF signature', header === 'glTF' && glb.size > 10000, glb);
+  record('GLB export includes catalogue furniture and provenance', glbFurniture.length > 8 && glbFurniture.every((node) => node.extras.source && node.extras.furnitureType), { furnitureNodes: glbFurniture.length });
   for (const name of ['Plan data', 'Generator module', '2D floor plan']) { const result = await download(name); record(`${name} is downloaded`, result.size > 500 && fs.existsSync(result.path), { bytes: result.size }); }
   const json = JSON.parse(fs.readFileSync(path.join(OUT, 'plan.json'), 'utf8'));
   record('Exported PlanSpec reflects edited slider values', json.rooms.find((r) => r.id === 'hall').polygon[1][0] > 6500);
@@ -106,6 +156,8 @@ try {
     return labels;
   });
   record('Room labels are occluded by walls in walkthrough', walkLabels.length === 5 && walkLabels.every((label) => label.depthTest && !label.depthWrite && !label.sizeAttenuation) && await page.locator('.canvas-wrap .viewer-host').getAttribute('data-labels-occluded') === 'true', { labels: walkLabels });
+  const visibleRoomLabels = await page.locator('.canvas-wrap .viewer-host').evaluate((host) => ({ visible: host.dataset.visibleLabel, count: Number(host.dataset.visibleLabels), room: host.dataset.spawnRoom }));
+  record('First-person labels are limited to the current room', visibleRoomLabels.visible === visibleRoomLabels.room && visibleRoomLabels.count === 1, visibleRoomLabels);
   const before = await canvasPixels();
   await page.keyboard.down('w'); await wait(1200); await page.keyboard.up('w'); await wait(150);
   record('WASD changes the rendered first-person scene', before !== await canvasPixels());
