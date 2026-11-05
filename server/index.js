@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { readFile } from 'node:fs/promises';
+import { completeLines, joinContinuation, lastNonEmptyLine, moduleParses } from './stitch.js';
 
 const app = new Hono();
 const API_KEY = process.env.NEBIUS_API_KEY;
@@ -24,11 +25,14 @@ async function completion(messages, kind, maxTokens = 18000) {
   const started = performance.now();
   let prefix = '';
   // A network drop must not discard a long generation. Continue from the exact partial content.
+  let stitched = false;
   for (let attempt = 0; attempt < 3; attempt++) {
+    // Nebius has no true assistant prefill for Kimi, so resume on a clean line boundary and join defensively.
+    const head = completeLines(prefix);
     const requestMessages = prefix ? [
       ...messages,
-      { role: 'assistant', content: prefix },
-      { role: 'user', content: 'Continue exactly from the character where your previous response stopped. Do not repeat any earlier text, add prose, or restart the answer.' },
+      { role: 'assistant', content: head },
+      { role: 'user', content: `Your previous answer was cut off. The last complete line was:\n${lastNonEmptyLine(head)}\nContinue with the line that comes right after it. Output only the remaining text: no code fence, no explanation, no repeated lines.` },
     ] : messages;
     const response = await fetch(`${BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -65,7 +69,8 @@ async function completion(messages, kind, maxTokens = 18000) {
       if (buffer) consume(buffer);
       reader.releaseLock();
     } catch (error) { failure = error; }
-    prefix += content;
+    if (head && content) { prefix = joinContinuation(head, content); stitched = true; }
+    else prefix += content;
     if (!prefix) {
       console.warn(`[${MODEL}] ${kind}: no content returned (${failure?.message || finishReason || 'incomplete response'}); retrying (${attempt + 1}/3).`);
       continue;
@@ -76,7 +81,7 @@ async function completion(messages, kind, maxTokens = 18000) {
       const tokensPerSecond = elapsed ? Math.round(tokens / elapsed * 10) / 10 : 0;
       const reasoning = usage?.completion_tokens_details?.reasoning_tokens ?? null;
       console.log(`[${MODEL}] ${kind}: ${tokens} completion tokens (${reasoning ?? 'unknown'} reasoning), ${tokensPerSecond} tokens/sec, ${elapsed.toFixed(1)}s`);
-      return { text: prefix, usage: { prompt: usage?.prompt_tokens ?? 0, completion: tokens, total: usage?.total_tokens ?? 0, reasoning }, elapsed: Math.round(elapsed * 100) / 100, tokensPerSecond, model: MODEL, reasoningEffort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT };
+      return { text: prefix, stitched, usage: { prompt: usage?.prompt_tokens ?? 0, completion: tokens, total: usage?.total_tokens ?? 0, reasoning }, elapsed: Math.round(elapsed * 100) / 100, tokensPerSecond, model: MODEL, reasoningEffort: kind === 'generate' ? GENERATE_REASONING_EFFORT : REVIEW_REASONING_EFFORT };
     }
     console.warn(`[${MODEL}] ${kind}: interrupted response, continuing ${prefix.length} characters (${attempt + 1}/3).`);
   }
@@ -96,7 +101,13 @@ app.get('/api/health', (c) => c.json({ ok: true, configured: Boolean(API_KEY), m
 app.post('/api/generate', async (c) => {
   try {
     const { image } = await c.req.json(); checkRequest(image);
-    const result = await completion([{ role: 'system', content: generatePrompt }, { role: 'user', content: [imagePart(image), { type: 'text', text: 'Read this floor plan and return the complete generator module.' }] }], 'generate');
+    const messages = [{ role: 'system', content: generatePrompt }, { role: 'user', content: [imagePart(image), { type: 'text', text: 'Read this floor plan and return the complete generator module.' }] }];
+    let result = await completion(messages, 'generate', 32000);
+    // A resumed stream that still does not parse would waste a whole review round; regenerate once instead.
+    if (result.stitched && !moduleParses(result.text)) {
+      console.warn(`[${MODEL}] generate: resumed module has a syntax error; regenerating once.`);
+      result = await completion(messages, 'generate', 32000);
+    }
     return c.json({ ...result, code: result.text });
   } catch (error) { console.error(error); return c.json({ error: error.message }, 500); }
 });
