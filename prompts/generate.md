@@ -5,7 +5,7 @@ export const PARAMS = {
   wall_height: { value: 2700, min: 2400, max: 3300, group: "global", label: "Wall height" },
   living_width: { value: 5500, min: 5000, max: 6000, group: "room", room: "living", label: "Living width" }
 };
-Then read P.wall_height and P.living_width. Even on large plans, do not use anonymous helper-call arrays as a shortcut: every parameter needs its own descriptive key used consistently in P. ASSUMPTIONS entries are { id, text, param? }.
+Then read P.wall_height and P.living_width. Even on large plans, do not use anonymous helper-call arrays as a shortcut: every parameter needs its own descriptive key used consistently in P. ASSUMPTIONS entries are { id, text, param? }. `group` is exactly "global" or "room", nothing else: grid lines, dimension-chain columns/rows and overall sizes use "global"; a room's own width/depth use "room" plus `room`.
 
 BEFORE LAYOUT: TRANSCRIBE THE EVIDENCE
 1. In your private analysis, inventory EVERY room/space label and EVERY written width × depth, including the room schedule/legend table. Cross-check labels against the schedule. Do not design a uniform grid unless the written dimensions themselves form one.

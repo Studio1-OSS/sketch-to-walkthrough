@@ -88,6 +88,12 @@ export function evaluateGenerator(source: string) {
   let rawParams = generated.PARAMS;
   if (isRecord(rawParams)) {
     rawParams = Object.fromEntries(Object.entries(rawParams).map(([key, value]) => {
+      if (isRecord(value) && value.group !== undefined && value.group !== 'global' && value.group !== 'room') {
+        // A label slip (e.g. "grid") must not discard a whole version.
+        const group = typeof value.room === 'string' && value.room ? 'room' : 'global';
+        repairs.push(`PARAMS.${key}: group "${String(value.group)}" is not global/room; using "${group}".`);
+        value = { ...value, group };
+      }
       if (!isRecord(value) || !finite(value.value) || !finite(value.min) || !finite(value.max) || value.min >= value.max) return [key, value];
       const clamped = Math.min(value.max, Math.max(value.min, value.value));
       if (clamped !== value.value) repairs.push(`PARAMS.${key}: clamped ${value.value} to ${clamped}, within [${value.min}, ${value.max}].`);

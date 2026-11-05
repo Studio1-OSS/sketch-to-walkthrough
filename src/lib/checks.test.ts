@@ -73,6 +73,13 @@ describe('sandbox source validation', () => {
     expect(result.plan.wallHeight).toBe(3400);
     expect(result.repairs.join()).toContain('clamped 3600 to 3400');
   });
+  it('repairs an unknown param group locally instead of rejecting the version', () => {
+    const source = SAMPLE_SOURCE.replace('group: "global", label: "Wall height"', 'group: "grid", label: "Wall height"');
+    expect(source).not.toBe(SAMPLE_SOURCE);
+    const result = buildFromModule(source);
+    expect(result.params.wall_height.group).toBe('global');
+    expect(result.repairs.join()).toContain('group "grid" is not global/room; using "global"');
+  });
   it('links a missing assumption param by name and records the repair', () => {
     const result = buildFromModule(SAMPLE_SOURCE.replace(', param: "wall_height"', ''));
     expect(result.assumptions[0].param).toBe('wall_height');
