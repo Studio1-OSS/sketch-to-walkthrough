@@ -93,14 +93,11 @@ async function completion(messages, kind, maxTokens = 18000) {
   throw new Error('Model stream was interrupted three times. Please try again.');
 }
 
+// No CORS headers: the browser reaches /api through the Vite proxy (same origin), so other sites cannot spend the key.
 app.use('*', async (c, next) => {
-  c.header('Access-Control-Allow-Origin', '*');
-  c.header('Access-Control-Allow-Headers', 'Content-Type');
-  c.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   c.header('X-Content-Type-Options', 'nosniff');
   await next();
 });
-app.options('*', (c) => c.body(null, 204));
 app.get('/api/health', (c) => c.json({ ok: true, configured: Boolean(API_KEY), model: MODEL, baseUrl: BASE_URL, generateReasoningEffort: GENERATE_REASONING_EFFORT, reviewReasoningEffort: REVIEW_REASONING_EFFORT }));
 
 app.post('/api/generate', async (c) => {
@@ -137,4 +134,6 @@ app.post('/api/review', async (c) => {
 });
 
 const port = Number(process.env.PORT || 8787);
-serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => console.log(`Sketch API listening on http://localhost:${info.port} using ${MODEL}`));
+// Localhost only by default: the API spends your Token Factory key and has no authentication.
+const hostname = process.env.HOST || '127.0.0.1';
+serve({ fetch: app.fetch, port, hostname }, (info) => console.log(`Sketch API listening on http://${hostname}:${info.port} using ${MODEL}`));

@@ -5,7 +5,7 @@ import path from 'node:path';
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:5180';
 const API_BASE = process.env.API_BASE_URL || BASE;
 const OUT = path.resolve('screenshots');
-const CHROME = `${process.env.HOME}/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`;
+const CHROME = process.env.CHROME_PATH ?? `${process.env.HOME}/Library/Caches/ms-playwright/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`;
 const browser = await chromium.launch({ executablePath: fs.existsSync(CHROME) ? CHROME : undefined, headless: true, args: ['--use-gl=angle', '--use-angle=swiftshader', '--no-sandbox', '--enable-webgl'] });
 const page = await browser.newPage();
 const results = [];

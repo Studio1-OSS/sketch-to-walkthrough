@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n API,WEB -c cyan,magenta \"node --watch server/index.js\" \"vite --host 0.0.0.0\"",
+    "dev": "concurrently -k -n API,WEB -c cyan,magenta \"node --watch server/index.js\" \"vite\"",
     "build": "tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0",
+    "preview": "vite preview",
     "server": "node server/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
